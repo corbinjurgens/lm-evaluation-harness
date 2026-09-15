@@ -1,0 +1,26 @@
+task: humaneval_chat_complete_v1
+dataset_path: openai/openai_humaneval
+unsafe_code: true
+output_type: generate_until
+test_split: test
+doc_to_text: "Complete this Python function. Return the full function as one fenced Python code block, including its signature and body, with no other text.\n```python\n{{ prompt }}\n```"
+doc_to_target: "{{ test }}\ncheck({{ entry_point }})"
+metric_list:
+  - metric: !function utils.pass_at_k
+    aggregation: mean
+    higher_is_better: true
+    k: [1]
+generation_kwargs:
+  max_gen_toks: 4096
+  reasoning_effort: low
+  until: []
+  do_sample: false
+repeats: 1
+num_fewshot: 0
+filter_list:
+  - name: complete_function_v1
+    filter:
+      - function: custom
+        filter_fn: !function utils.humaneval_complete
+metadata:
+  version: 1.0
