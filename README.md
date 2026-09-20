@@ -2,6 +2,217 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.10256836.svg)](https://doi.org/10.5281/zenodo.10256836)
 
+## This fork: chat-model benchmark corrections
+
+Status: 2026-09-20. The `codex/chat-complete-evals` branch of
+[corbinjurgens/lm-evaluation-harness](https://github.com/corbinjurgens/lm-evaluation-harness)
+applies the corrections below to **normal task names**, for GPT-OSS and other
+models using the same answer contract. New comparisons use `humaneval`, `mbpp`,
+`gsm8k_cot_zeroshot`, and `ifeval`, without `--include_path` or GPT-OSS-only task
+names. These changed prompts and filters are fork methodology, not identical
+upstream benchmarks. Compatibility fixtures are not a guarantee for every model
+or output format; rerun comparison models under the same revision and profile.
+
+### Active task changes
+
+| Tasks | Current version | Change |
+| --- | --- | --- |
+| `humaneval`, `humaneval_64`, `humaneval_plus` | 3.0 | Complete-answer prompt and conservative Python extraction |
+| `humaneval_instruct` | 6.0 | Same complete-answer contract |
+| `humaneval_64_instruct` | 5.0 | Same contract with repeated sampling |
+| `mbpp`, `mbpp_instruct`, `mbpp_plus`, `mbpp_plus_instruct` | 3.0 | Complete-answer prompt, fenced few-shot answers, conservative Python extraction |
+| `gsm8k_cot_zeroshot` | 5.0 | Explicit strict-answer instruction and corrected strict numeric grammar |
+| `ifeval` | 4.0, unchanged | No scoring relaxation or model-specific task patch |
+
+HumanEval and MBPP ask for complete code, without an assistant fence prefill.
+They retain their datasets, reference tests and few-shot counts. Their premature
+code-oriented stop strings were removed; their default allowance is 4,096 tokens,
+overridable with `--gen_kwargs`. Base and instruct aliases now share the relevant
+contract; scores from these aliases are not independent benchmark evidence.
+
+The shared extractor in `lm_eval/tasks/_code_extraction.py` preserves valid raw
+Python verbatim. It removes explicit Markdown envelopes, accepts unlabeled or
+`python`/`python3`/`py` blocks, and joins closed Python blocks in source order.
+Imports, helpers, repeated definitions, assertions and other statements remain;
+it does not select a winning definition, execute alternatives to choose one,
+dedent programs, or repair malformed Python. Python string contents and original
+physical line endings are preserved. An unfinished accepted code block rejects
+the envelope rather than falling back to an earlier complete answer. Unrecognized
+unfenced prose remains part of the candidate and can fail execution. HumanEval
+also retains legacy indented body continuations by appending them to the original
+function prompt. Empty, wrong and malformed candidates are not rescued.
+
+GSM8K asks for `The answer is <number>.` at the end of the response. Its strict
+filter accepts an optional minus sign, integer or decimal, and correctly grouped
+thousands separators, followed by a literal sentence period and whitespace or
+end-of-response. Thus `The answer is 42.` is valid; a missing period, currency,
+units, malformed grouping, or a quote/Markdown closer immediately after the
+period is not. It takes the first valid matching marker, not necessarily the last
+sentence. The flexible filter and exact-match metric are unchanged. Version 4
+added the instruction; version 5 repairs the old wildcard-period/numeric capture.
+Report both metrics and do not merge scores across these versions.
+
+### API sampling and diagnostics
+
+The local OpenAI-compatible adapters copy generation arguments before payload
+construction. Sampled draws (`do_sample=true` or positive `temperature`) receive
+distinct deterministic seeds based on the model's `seed` (default 1234), allocated
+before async scheduling. A transport retry keeps that draw's seed and request ID;
+an explicit generation `seed` remains authoritative, and greedy requests retain
+their fixed seed. This creates distinct sampling opportunities, not guaranteed
+distinct text or reproducibility across server builds or different request order.
+For pass@k, use a declared sampling profile; do not force the same generation seed
+for every repeat if independent draws are intended.
+
+Malformed chat choices, indices, content shapes and response cardinality fail
+loudly. Legitimate null/empty final answers remain scored empty answers; a
+`finish_reason=length` answer is warned about and retained. Completed-response
+parsing/cache failures and diagnostic-write failures abort instead of selectively
+resampling until an acceptable answer appears. Transport failures retain the
+existing retry policy; no content-based retry was added.
+
+Opt in to append-only JSONL diagnostics with
+`transport_log=/absolute/writable/path/transport.jsonl` in `--model_args`.
+Create the parent directory first and use a unique path per run. Each HTTP attempt
+records a correlation ID, attempt number, status/error type, allowlisted wire
+controls including seed and known thinking/template controls, final content,
+finish reason, response shape and allowlisted numeric token usage. Authorization
+headers, URLs, arbitrary extra fields, exception text and reasoning content are
+not logged. **Prompts and final answers are logged and can contain sensitive
+data**; this is not a general-purpose redactor. Logged controls prove what was
+sent, not that the remote server honored it. There is no automatic comprehensive
+runtime/dataset/model provenance manifest yet.
+
+### Install and run this fork
+
+Use Python 3.13 for the current local environment. The observed Python 3.14
+installation could not resolve the IFEval dependency chain on this platform.
+Install the checkout, not the normal PyPI package:
+
+```bash
+git clone --branch codex/chat-complete-evals https://github.com/corbinjurgens/lm-evaluation-harness.git
+cd lm-evaluation-harness
+python3.13 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[api,ifeval]'
+python -c 'import lm_eval; print(lm_eval.__file__)'
+python -m pip show lm_eval
+```
+
+Both import path and editable project location must refer to this checkout.
+These commands are a source install, not a dependency lock or code sandbox.
+Do not replace it with `pip install lm-eval`. The current Mac Compose file lives
+outside this fork at `/Users/apple/lm-evaluation-harness/docker-compose.yml`;
+it mounts `/Users/apple/personal/lm-evaluation-harness` at `/workspace` and installs
+`.[api,ifeval]` editable at startup from `dhi.io/python:3.13-dev`.
+That mutable image tag and startup dependency resolution are not a pinned build.
+
+For example, with `MODEL`, `UNSLOTH_URL` (host:port), and credentials already set,
+run a non-code smoke test inside that container:
+
+```bash
+export RESULT_FOLDER=/workspace/results_gsm8k_fresh
+mkdir -p "$RESULT_FOLDER"
+lm-eval run --model local-chat-completions \
+  --model_args "model=${MODEL},base_url=http://${UNSLOTH_URL}/v1/chat/completions,num_concurrent=4,tokenizer_backend=None,transport_log=${RESULT_FOLDER}/transport.jsonl" \
+  --apply_chat_template --log_samples --limit 10 \
+  --tasks gsm8k_cot_zeroshot \
+  --gen_kwargs "temperature=1.0,top_p=1.0,reasoning_effort=low,max_gen_toks=4096" \
+  --output_path "$RESULT_FOLDER"
+```
+
+The example is a GPT-OSS low-effort profile, not a universal best setting. Omit
+unsupported reasoning controls for other families. Limited runs validate plumbing,
+not benchmark quality. Fresh comparisons omit **both** `--use_cache` (responses)
+and `--cache_requests` (preprocessed requests); a new output folder alone does not
+invalidate either cache. Generic cache identity limitations have not been fixed
+in core cache code. Use another fresh output/log directory for the full run.
+
+Declare whether a comparison uses matched sampling/budget controls or practical
+model-specific profiles. For example, temperature 1 for GPT-OSS versus omitted
+temperature (0 on this adapter) for Qwen is not a matched sampling comparison.
+Record evaluator revision/dirty state, task versions, dataset identity, full
+generation settings, seeds, concurrency, timeout, environment/image identity,
+server binary and launch flags, GGUF identity, effective template/date/context
+settings, and execution limits. With `tokenizer_backend=None`, the client cannot
+establish tokenized context fit. Inspect raw and filtered answers plus the
+transport log before trusting a full result.
+
+### Server responsibilities and unfinished deployment
+
+The [llama.cpp fork](https://github.com/corbinjurgens/llama.cpp), branch
+`gpt-oss-final-constrain`, contains separate fixes: `fe79b4036` accepts an optional
+GPT-OSS final-channel constraint tag; `775f85037` guards optional JSON-schema
+`items` in the template. IFEval remains unchanged in this evaluator. Task-level
+IFEval allowance is 1,280 tokens: a model-argument fallback does not override it;
+use explicit `--gen_kwargs` for a larger budget. GPT-OSS low effort still reasons;
+it is not a no-thinking mode.
+
+Verify the loaded server on the model PC, not just this source checkout. Final-only
+scoring requires the server to separate analysis from `message.content`; the
+fork's documented `--reasoning-format deepseek` puts it in
+`message.reasoning_content`, while `none` leaves it in content and
+`deepseek-legacy` retains thinking tags there. Verify the actual response. Do not
+restore the old `--chat-template gpt-oss` workaround under `--jinja`, where that
+argument can be interpreted as literal template text. No fresh cross-model
+inference or remote deployment verification is claimed by these local fixes.
+
+**Scoring backend repaired locally; isolated deployment still pending.** Normal
+HumanEval/MBPP helpers now use the fork-owned `lm_eval/tasks/_code_eval.py` backend
+and `_code_eval_worker.py`, not a dynamically downloaded `evaluate` metric.
+Importing task helpers no longer executes a candidate; `HF_ALLOW_CODE_EVAL=1` is
+checked when scoring actually runs. The candidate-plus-reference contract and
+pass@k estimator are retained, but the execution implementation has changed.
+
+Each candidate runs in a fresh Python process with a private verdict pipe,
+discarded stdout/stderr, per-candidate timeout and resource limits. The parent
+cleans the original process group and scratch files. Candidate exceptions,
+abnormal exits and timeouts fail the candidate; infrastructure failures abort
+rather than becoming model failures. The backend requires POSIX process groups;
+use a Linux container on Windows. The former `evaluate` 0.4.6 / `filelock` 4.0.1
+threaded-fork failure is repaired in this local task path without disabling the
+filelock guard. Local regression checks cover singleton/repeated candidates, timeouts,
+cleanup, NumPy and normal-task integration. They are not a fresh model benchmark
+or remote deployment acceptance. Process cleanup and accident guards are not
+malicious-code containment.
+
+The backend defaults are four supervisors, a 3-second candidate timeout,
+10-second startup timeout, 1 MiB per-file limit and a CPU-time backstop. An
+address-space limit is optional and unset by default; deployment-level memory
+and process limits are still necessary. Worker guard attribution is retained in
+the source and `licenses/code_eval-APACHE-2.0.txt`.
+
+The existing `lm_eval_sandbox` has network access and a writable source mount; its
+name does not make it secure for untrusted generated Python. Coding evaluation
+requires `HF_ALLOW_CODE_EVAL=1` and `--confirm_run_unsafe_code`, but those flags
+only acknowledge risk. A pinned, credential-free, network-disabled execution
+boundary with read-only inputs, resource limits and an init reaper remains
+pending. The approved design is a host launcher that generates first and then
+scores in a separate offline container; implementation is in progress.
+Digest-pinned image/dependency build assets now exist in `docker/Dockerfile` and
+`docker/requirements.lock` and have passed local build checks. A final source
+rebuild and the complete two-stage workflow verification remain pending. There
+is no finished safe launcher to invoke yet.
+
+### Regression checks and historical experiments
+
+The focused regression suites are `tests/test_humaneval_extraction.py`,
+`tests/test_mbpp_extraction.py`, `tests/test_gsm8k_zeroshot_format.py`,
+`tests/models/test_api_diagnostics.py`, and `tests/test_code_eval_backend.py`,
+alongside the existing API suites and normal-task integration fixtures.
+Run them with `python -m pytest -q` and the desired paths in a dependency-equipped,
+isolated test environment. Existing tokenizer tests additionally require
+`transformers`; the API-only production environment does not install it.
+
+Historical v1/v2 tasks in [diagnostics/chat_coding_tasks](diagnostics/chat_coding_tasks/README.md)
+are not the new comparison route. Their YAML imports live Python helpers, so
+selecting an old task name in a new checkout does **not** reproduce the original
+extractor/metric. Pin the original evaluator revision and environment for exact
+historical work. Original measurements and raw responses have not been relabeled
+or silently rescored.
+
+The upstream README continues below unchanged.
+
 ---
 
 ## Latest News 📣
