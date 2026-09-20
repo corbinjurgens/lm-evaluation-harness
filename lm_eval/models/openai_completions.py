@@ -5,7 +5,7 @@ from operator import itemgetter
 from typing import Any
 
 from lm_eval.api.registry import register_model
-from lm_eval.models.api_models import TemplateAPI
+from lm_eval.models.api_models import APIResponseError, TemplateAPI
 from lm_eval.models.utils import handle_stop_sequences, postprocess_generated_text
 
 
@@ -216,27 +216,47 @@ class LocalChatCompletion(LocalCompletionsAPI):
         if not isinstance(outputs, list):
             outputs = [outputs]
         for out in outputs:
-            try:
-                tmp = [None] * len(out["choices"])
-                for choices in out["choices"]:
-                    content = choices["message"]["content"]
-                    tmp[choices["index"]] = (
-                        postprocess_generated_text(
-                            content,
-                            stop=None,
-                            think_end_token=self.think_end_token,
-                        )
-                        if content is not None
-                        else None
+            if not isinstance(out, dict) or not isinstance(out.get("choices"), list):
+                raise APIResponseError("Chat response must contain a choices list")
+            choices_list = out["choices"]
+            if not choices_list:
+                raise APIResponseError("Chat response choices must not be empty")
+            indices = [
+                choice.get("index") if isinstance(choice, dict) else None
+                for choice in choices_list
+            ]
+            if any(type(index) is not int for index in indices) or sorted(
+                indices
+            ) != list(range(len(choices_list))):
+                raise APIResponseError(
+                    "Chat choice indices must be unique and contiguous from zero"
+                )
+            tmp = [None] * len(choices_list)
+            for choice in choices_list:
+                message = choice.get("message")
+                if not isinstance(message, dict) or "content" not in message:
+                    raise APIResponseError("Chat choice is missing message.content")
+                content = message["content"]
+                if content is not None and not isinstance(content, str):
+                    raise APIResponseError("Chat content must be a string or null")
+                if choice.get("finish_reason") == "length":
+                    eval_logger.warning(
+                        "API generation reached its token limit (finish_reason=length); preserving the returned answer"
                     )
-            except (IndexError, KeyError, TypeError) as e:
-                # account for cases that generation is blocked by content filter,
-                # which is common for Azure OpenAI Service,
-                # not sure if need to account for multiple choices
-                eval_logger.warning(f"Could not parse generations: {e}")
-                tmp = [""]
+                tmp[choice["index"]] = (
+                    postprocess_generated_text(
+                        content,
+                        stop=None,
+                        think_end_token=self.think_end_token,
+                    )
+                    if content is not None
+                    else None
+                )
             res = res + tmp
         return res
+
+    def _validate_transport(self, outputs, expected):
+        self._generation_answers(outputs, expected)
 
     def tok_encode(
         self,

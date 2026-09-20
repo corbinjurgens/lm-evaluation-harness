@@ -5,6 +5,7 @@ import itertools
 import json
 import logging
 import os
+import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from functools import cached_property
 from typing import (
@@ -17,8 +18,13 @@ from typing import (
 
 try:
     import requests
-    from aiohttp import ClientSession, ClientTimeout, TCPConnector
-    from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
+    from aiohttp import ClientSession, ClientTimeout, ContentTypeError, TCPConnector
+    from tenacity import (
+        retry,
+        retry_if_not_exception_type,
+        stop_after_attempt,
+        wait_exponential,
+    )
     from tqdm import tqdm
     from tqdm.asyncio import tqdm_asyncio
 except ModuleNotFoundError:
@@ -49,6 +55,18 @@ LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER = os.environ.get(
 eval_logger = logging.getLogger(__name__)
 
 LogLikelihoodInputs = tuple[tuple[str, str], list[int], list[int]]
+
+
+class APIResponseError(ValueError):
+    """A completed request returned an invalid response; do not resample it."""
+
+
+class APIDiagnosticsError(OSError):
+    """The requested audit record could not be persisted."""
+
+
+class APIProcessingError(APIResponseError):
+    """Local processing of a completed response failed; never resample it."""
 
 
 # utility class to keep track of json encoded chats
@@ -140,6 +158,7 @@ class TemplateAPI(TemplateLM):
         timeout: int = 300,
         header: dict[str, str] | None = None,
         max_images: int = 1,
+        transport_log: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -172,6 +191,10 @@ class TemplateAPI(TemplateLM):
         self._truncate = truncate
         self._max_gen_toks = int(max_gen_toks)
         self._seed = int(seed)
+        self.transport_log = transport_log
+        self._draw_counter = 0
+        self._request_counter = 0
+        self._transport_run_id = uuid.uuid4().hex
         # max_length - 1 as we always have 1 token for generation
         eval_logger.info(f"Using max length {max_length} - 1")
         self.max_length = max_length - 1
@@ -450,42 +473,228 @@ class TemplateAPI(TemplateLM):
         elif self.tokenizer_backend == "remote":
             return self.tokenizer.batch_decode(tokens)
 
+    def _request_context(self, gen_kwargs=None, generate=True):
+        """Allocate once per draw, before a transport retry or async scheduling."""
+        gen_kwargs = gen_kwargs or {}
+        seed = gen_kwargs.get("seed", self._seed)
+        if (
+            generate
+            and "seed" not in gen_kwargs
+            and (
+                gen_kwargs.get("do_sample", False)
+                or gen_kwargs.get("temperature", 0) > 0
+            )
+        ):
+            seed = (self._seed + self._draw_counter) % (2**31)
+            self._draw_counter += 1
+        self._request_counter += 1
+        return {
+            "id": f"{self._transport_run_id}-{self._request_counter}",
+            "seed": seed,
+            "attempt": 0,
+        }
+
+    def _record_transport(self, context, payload, outputs=None, error=None):
+        if not self.transport_log:
+            return
+        # Deliberate allowlists: never serialize headers, URLs, arbitrary request
+        # extras, exception strings or full response bodies (which may echo auth).
+        request = {
+            key: payload[key]
+            for key in (
+                "messages",
+                "prompt",
+                "model",
+                "seed",
+                "temperature",
+                "max_tokens",
+                "max_completion_tokens",
+                "stop",
+                "top_p",
+                "top_k",
+                "min_p",
+                "typical_p",
+                "frequency_penalty",
+                "presence_penalty",
+                "repeat_penalty",
+                "repeat_last_n",
+                "mirostat",
+                "mirostat_tau",
+                "mirostat_eta",
+                "dynatemp_range",
+                "dynatemp_exponent",
+                "xtc_probability",
+                "xtc_threshold",
+                "samplers",
+                "enable_thinking",
+                "reasoning_effort",
+            )
+            if key in payload
+        }
+        template_kwargs = payload.get("chat_template_kwargs")
+        if isinstance(template_kwargs, dict):
+            request["chat_template_kwargs"] = {
+                key: template_kwargs[key]
+                for key in ("enable_thinking", "reasoning_effort")
+                if key in template_kwargs
+            }
+        record = {
+            "request_id": context["id"],
+            "attempt": context["attempt"],
+            "request": request,
+            "error": type(error).__name__ if error is not None else None,
+            "http_status": context.get("http_status"),
+            "response_type": type(outputs).__name__,
+        }
+        envelopes = outputs if isinstance(outputs, list) else [outputs]
+        summaries = []
+        for envelope in envelopes:
+            summary = {"response_type": type(envelope).__name__}
+            if not isinstance(envelope, dict):
+                summaries.append(summary)
+                continue
+            summary["usage"] = self._diagnostic_usage(envelope.get("usage"))
+            choices = envelope.get("choices")
+            summary["choices_type"] = type(choices).__name__
+            if isinstance(choices, list):
+                summary["choices"] = [
+                    {
+                        "index": choice.get("index"),
+                        "finish_reason": choice.get("finish_reason"),
+                        "content_present": "content" in choice.get("message", {})
+                        if isinstance(choice.get("message"), dict)
+                        else "text" in choice,
+                        "content": choice.get("message", {}).get("content")
+                        if isinstance(choice.get("message"), dict)
+                        else choice.get("text"),
+                    }
+                    for choice in choices
+                    if isinstance(choice, dict)
+                ]
+            summary["choices_present"] = "choices" in envelope
+            summaries.append(summary)
+        if len(summaries) == 1:
+            record.update(
+                {
+                    key: value
+                    for key, value in summaries[0].items()
+                    if key != "response_type"
+                }
+            )
+        elif isinstance(outputs, list):
+            record["responses"] = summaries
+        try:
+            with open(self.transport_log, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except (OSError, TypeError, ValueError) as exc:
+            raise APIDiagnosticsError("Could not write transport_log") from exc
+
+    @staticmethod
+    def _diagnostic_usage(usage):
+        if not isinstance(usage, dict):
+            return None
+        numeric_fields = (
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+        )
+        details = {
+            "prompt_tokens_details": ("cached_tokens", "audio_tokens"),
+            "completion_tokens_details": (
+                "reasoning_tokens",
+                "audio_tokens",
+                "accepted_prediction_tokens",
+                "rejected_prediction_tokens",
+            ),
+            "input_tokens_details": ("cached_tokens", "audio_tokens"),
+            "output_tokens_details": ("reasoning_tokens", "audio_tokens"),
+        }
+
+        def counts(values, fields):
+            return {
+                key: values[key]
+                for key in fields
+                if type(values.get(key)) is int and values[key] >= 0
+            }
+
+        result = counts(usage, numeric_fields)
+        for key, fields in details.items():
+            if isinstance(usage.get(key), dict):
+                result[key] = counts(usage[key], fields)
+        return result
+
+    def _cache_partial(self, method, key, answer):
+        try:
+            self.cache_hook.add_partial(method, key, answer)
+        except Exception as exc:
+            raise APIProcessingError("Could not cache completed API response") from exc
+
+    def _generation_answers(self, outputs, expected, **kwargs):
+        try:
+            answers = self.parse_generations(outputs=outputs, **kwargs)
+        except APIResponseError:
+            raise
+        except Exception as exc:
+            raise APIProcessingError("Could not parse completed API response") from exc
+        if len(answers) != expected:
+            raise APIResponseError(
+                f"Expected {expected} generation(s), received {len(answers)}"
+            )
+        return answers
+
+    def _validate_transport(self, outputs, expected):
+        """Adapters can reject malformed completed requests before retries."""
+
     def model_call(
         self,
         messages: list[list[int]] | list[str] | list[JsonChatStr],
         *,
         generate: bool = True,
         gen_kwargs: dict | None = None,
+        request_context: dict | None = None,
         **kwargs,
     ) -> dict | None:
         # !!! Copy: shared dict for each request, need new object !!!
         gen_kwargs = copy.deepcopy(gen_kwargs)
+        context = request_context or self._request_context(gen_kwargs, generate)
+        context["attempt"] += 1
+        context["http_status"] = None
+        payload = self._create_payload(
+            self.create_message(messages),
+            generate=generate,
+            gen_kwargs=gen_kwargs,
+            seed=context["seed"],
+            eos=self.eos_string,
+            **kwargs,
+        )
+        outputs = None
         try:
             response = requests.post(
                 self.base_url,
-                json=self._create_payload(
-                    self.create_message(messages),
-                    generate=generate,
-                    gen_kwargs=gen_kwargs,
-                    seed=self._seed,
-                    eos=self.eos_string,
-                    **kwargs,
-                ),
+                json=payload,
                 headers=self.header,
                 verify=self.verify_certificate,
                 timeout=self.timeout,
             )
+            context["http_status"] = response.status_code
             if not response.ok:
                 eval_logger.warning(
                     f"API request failed with error message: {response.text}. Retrying..."
                 )
             response.raise_for_status()
-            return response.json()
-        except RetryError:
-            eval_logger.error(
-                "API request failed after multiple retries. Please check the API status."
-            )
-            return None
+            try:
+                outputs = response.json()
+            except ValueError as exc:
+                raise APIResponseError("API response is not valid JSON") from exc
+            if generate:
+                self._validate_transport(outputs, len(messages))
+        except Exception as exc:
+            self._record_transport(context, payload, outputs, exc)
+            raise
+        self._record_transport(context, payload, outputs)
+        return outputs
 
     async def amodel_call(
         self,
@@ -497,25 +706,34 @@ class TemplateAPI(TemplateLM):
         cache_keys: list | None = None,
         ctxlens: list[int] | None = None,
         gen_kwargs: dict | None = None,
+        request_context: dict | None = None,
         **kwargs,
     ) -> list[str] | list[tuple[float, bool]] | None:
         # !!! Copy: shared dict for each request, need new object !!!
         gen_kwargs = copy.deepcopy(gen_kwargs)
+        context = request_context or self._request_context(gen_kwargs, generate)
+        context["attempt"] += 1
+        context["http_status"] = None
         payload = self._create_payload(
             self.create_message(messages),
             generate=generate,
             gen_kwargs=gen_kwargs,
-            seed=self._seed,
+            seed=context["seed"],
+            eos=self.eos_string,
             **kwargs,
         )
         cache_method = "generate_until" if generate else "loglikelihood"
         acquired = await sem.acquire()
+        outputs = None
+        completed = False
+        recorded = False
         try:
             async with session.post(
                 self.base_url,
                 json=payload,
                 headers=self.header,
             ) as response:
+                context["http_status"] = response.status
                 if not response.ok:
                     error_text = await response.text()
                     eval_logger.warning(
@@ -524,11 +742,13 @@ class TemplateAPI(TemplateLM):
                     )
                 # raising exception will retry the request
                 response.raise_for_status()
-                outputs = await response.json()
+                try:
+                    outputs = await response.json()
+                except (ValueError, ContentTypeError) as exc:
+                    raise APIResponseError("API response is not valid JSON") from exc
+            completed = True
             tmp_answers = (
-                self.parse_generations(
-                    outputs=outputs,
-                )
+                self._generation_answers(outputs, len(messages))
                 if generate
                 else self.parse_logprobs(
                     outputs=outputs,
@@ -536,6 +756,8 @@ class TemplateAPI(TemplateLM):
                     ctxlens=ctxlens,
                 )
             )
+            self._record_transport(context, payload, outputs)
+            recorded = True
 
             # Convert `None`` values to `LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER` string to maintain consistency
             answers = []
@@ -549,14 +771,29 @@ class TemplateAPI(TemplateLM):
                     answers.append(a)
 
             if cache_keys:
-                for res, cache in zip(answers, cache_keys, strict=False):
-                    self.cache_hook.add_partial(cache_method, cache, res)
+                for answer, res, cache in zip(
+                    tmp_answers, answers, cache_keys, strict=generate
+                ):
+                    if answer is not None:
+                        self._cache_partial(cache_method, cache, res)
             return answers
         # If the retries also fail
         except BaseException as e:
+            if not recorded and not isinstance(e, APIDiagnosticsError):
+                self._record_transport(context, payload, outputs, e)
             eval_logger.error(
-                f"Exception:{e!r}, {locals().get('outputs', '(no outputs)')}, retrying."
+                "API request failed during %s: %s",
+                "local processing" if completed else "transport",
+                type(e).__name__,
             )
+            if (
+                completed
+                and isinstance(e, Exception)
+                and not isinstance(e, (APIResponseError, APIDiagnosticsError))
+            ):
+                raise APIProcessingError(
+                    "Could not process completed API response"
+                ) from e
             raise
         finally:
             if acquired:
@@ -595,12 +832,17 @@ class TemplateAPI(TemplateLM):
         **kwargs,
     ) -> list[list[str]] | list[list[tuple[float, bool]]]:
         ctxlens = ctxlens or [None] * len(requests)
+        if len(cache_keys) != len(requests) or len(ctxlens) != len(requests):
+            raise ValueError("Request, cache-key and context-length counts must agree")
         conn = TCPConnector(limit=self._concurrent, ssl=self.verify_certificate)
         sem = asyncio.Semaphore(self._concurrent)
         async with ClientSession(
             connector=conn, timeout=ClientTimeout(total=self.timeout)
         ) as session:
             retry_: Callable[..., Awaitable[Any]] = retry(
+                retry=retry_if_not_exception_type(
+                    (APIResponseError, APIDiagnosticsError)
+                ),
                 stop=stop_after_attempt(self.max_retries),
                 wait=wait_exponential(multiplier=0.5, min=1, max=10),
                 reraise=True,
@@ -618,6 +860,9 @@ class TemplateAPI(TemplateLM):
                         cache_keys=cache_key,
                         generate=generate,
                         ctxlens=ctxlen,
+                        request_context=self._request_context(
+                            kwargs.get("gen_kwargs"), generate
+                        ),
                         **kwargs,
                     )
                 )
@@ -625,7 +870,7 @@ class TemplateAPI(TemplateLM):
                     chunks(requests, n=self._batch_size),
                     chunks(cache_keys, n=self._batch_size),
                     chunks(ctxlens, n=self._batch_size),
-                    strict=False,
+                    strict=True,
                 )
             ]
 
@@ -662,6 +907,9 @@ class TemplateAPI(TemplateLM):
                 inputs, ctxlens, cache_keys = self.batch_loglikelihood_requests([chunk])
 
                 outputs = retry(
+                    retry=retry_if_not_exception_type(
+                        (APIResponseError, APIDiagnosticsError)
+                    ),
                     stop=stop_after_attempt(self.max_retries),
                     wait=wait_exponential(multiplier=0.5, min=1, max=10),
                     reraise=True,
@@ -773,6 +1021,9 @@ class TemplateAPI(TemplateLM):
 
                 req = encodings_list if self.tokenized_requests else contexts
                 outputs = retry(
+                    retry=retry_if_not_exception_type(
+                        (APIResponseError, APIDiagnosticsError)
+                    ),
                     stop=stop_after_attempt(self.max_retries),
                     wait=wait_exponential(multiplier=0.5, min=1, max=10),
                     reraise=True,
@@ -780,14 +1031,16 @@ class TemplateAPI(TemplateLM):
                     messages=req,
                     generate=True,
                     gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
+                    request_context=self._request_context(all_gen_kwargs[0]),
                 )
                 for generated_text, context in zip(
-                    self.parse_generations(
-                        outputs=outputs,
+                    self._generation_answers(
+                        outputs,
+                        len(contexts),
                         contexts=contexts,
                     ),
                     contexts,
-                    strict=False,
+                    strict=True,
                 ):
                     # Always append to res to maintain the correct number of items
                     # even if generation failed (generated_text is None)
@@ -802,7 +1055,7 @@ class TemplateAPI(TemplateLM):
 
                     # partial caching only for successful generations
                     if generated_text is not None and context is not None:
-                        self.cache_hook.add_partial(
+                        self._cache_partial(
                             "generate_until",
                             (context, all_gen_kwargs[0]),
                             generated_text,
