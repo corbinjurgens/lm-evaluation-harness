@@ -23,7 +23,7 @@ def test_normal_task_requests_strict_format_and_reasoning(task_config):
     assert "without a currency symbol, units, or boxing" in prompt
     assert prompt.endswith("A: Let's think step by step.")
     assert task_config["task"] == "gsm8k_cot_zeroshot"
-    assert task_config["metadata"]["version"] == 4.0
+    assert task_config["metadata"]["version"] == 5.0
     assert [f["name"] for f in task_config["filter_list"]] == [
         "strict-match",
         "flexible-extract",
@@ -39,11 +39,40 @@ def test_normal_task_requests_strict_format_and_reasoning(task_config):
         ("The answer is -12.5.", "-12.5", "-12.5", "-12.5.", 1, 1),
         ("The answer is 1,234.", "1234", "1,234", "1,234.", 1, 1),
         ("The answer is -1,234.5.", "-1234.5", "-1,234.5", "-1,234.5.", 1, 1),
+        ("The answer is 0.", "0", "0", "0.", 1, 1),
+        ("The answer is 1234567.", "1234567", "1234567", "1234567.", 1, 1),
+        ("The answer is 1,234,567.", "1234567", "1,234,567", "1,234,567.", 1, 1),
+        ("The answer is -0.125.\n", "-0.125", "-0.125", "-0.125.", 1, 1),
         ("The answer is 6.", "5", "6", "6.", 0, 0),
         ("The answer is -5.", "5", "-5", "-5.", 0, 0),
         ("The answer is 1.25.", "125", "1.25", "1.25.", 0, 0),
         ("The total is 5.", "5", "[invalid]", "5.", 0, 1),
         ("I cannot solve this.", "5", "[invalid]", "[invalid]", 0, 0),
+        ("The answer is 42", "4", "[invalid]", "42", 0, 0),
+        ("The answer is 4x", "4", "[invalid]", "4", 0, 1),
+        ("The answer is 4.2", "4.2", "[invalid]", "4.2", 0, 1),
+        ("The answer is 4.2.3.", "4.2", "[invalid]", "4.2.3.", 0, 0),
+        ("The answer is 4..", "4", "[invalid]", "4..", 0, 0),
+        ("The answer is 4.,2.", "4", "[invalid]", "4.,2.", 0, 0),
+        ("The answer is 1,23.", "123", "[invalid]", "1,23.", 0, 1),
+        ("The answer is 1234,567.", "1234567", "[invalid]", "1234,567.", 0, 1),
+        ("The answer is 1,234,56.", "123456", "[invalid]", "1,234,56.", 0, 1),
+        ("The answer is 1.2,345.", "1.2345", "[invalid]", "1.2,345.", 0, 1),
+        ("The answer is 4.e2.", "4", "[invalid]", "2.", 0, 0),
+        ("The answer is 4.2e3.", "4.2", "[invalid]", "3.", 0, 0),
+        ("The answer is 4._0.", "4", "[invalid]", "0.", 0, 0),
+        ("The answer is 4.+2.", "4", "[invalid]", "2.", 0, 0),
+        ("The answer is 4.-2.", "4", "[invalid]", "-2.", 0, 0),
+        ("The answer is $4.", "4", "[invalid]", "$4.", 0, 1),
+        ("The answer is 4 dollars.", "4", "[invalid]", "4", 0, 1),
+        ("The answer is \\boxed{4}.", "4", "[invalid]", "4", 0, 1),
+        ("the answer is 4.", "4", "[invalid]", "4.", 0, 1),
+        ("The answer is 4. The answer is 5.", "4", "4", "5.", 1, 0),
+        ("The answer is 4. The answer is 5.", "5", "4", "5.", 0, 1),
+        ("The answer is 4x. The answer is 5.", "5", "5", "5.", 1, 1),
+        ("The answer is 4.\nAdditional explanation follows.", "4", "4", "4.", 1, 1),
+        ('The answer is 4."', "4", "[invalid]", "4.", 0, 1),
+        ("**The answer is 4.**", "4", "[invalid]", "4.", 0, 1),
     ],
 )
 def test_task_filters_and_metric(
