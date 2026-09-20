@@ -37,6 +37,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["lm_eval*"]
 
+[tool.setuptools]
+license-files = ["LICENSE.md", "licenses/code_eval-APACHE-2.0.txt"]
+
 # required to include yaml files in pip installation
 [tool.setuptools.package-data]
 lm_eval = ["**/*.yaml", "tasks/**/*"]

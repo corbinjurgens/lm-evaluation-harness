@@ -1,0 +1,10 @@
+# Project runtime requirements come from pyproject.toml with api and ifeval extras.
+# Build tooling and the focused fork regression suite are locked together.
+setuptools
+wheel
+pip
+pytest>=9.0
+ruff
+transformers
+# Keep the multiprocessing-fork safety protection enabled.
+filelock==4.0.1

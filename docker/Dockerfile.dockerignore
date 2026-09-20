@@ -1,0 +1,14 @@
+# This allowlist applies only to docker/Dockerfile builds, not user checkout data.
+**
+!pyproject.toml
+!README.md
+!LICENSE.md
+!licenses/
+!licenses/code_eval-APACHE-2.0.txt
+!lm_eval/
+!lm_eval/**
+!docker/
+!docker/requirements.lock
+**/__pycache__
+**/*.pyc
+**/.DS_Store
