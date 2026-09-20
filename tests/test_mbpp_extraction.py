@@ -84,14 +84,14 @@ def test_extract_complete_code_preserves_program(mbpp, response, expected):
         ("```python\ndef add(a, b):\n```", 0.0),
     ],
 )
-def test_original_execution_metric_scores_extracted_answers(
+def test_owned_execution_metric_scores_extracted_answers(
     mbpp, response, expected_score
 ):
     predictions = mbpp.build_predictions([[response]], [{"test_list": ["ignored"]}])
     assert mbpp.pass_at_1(["assert add(2, 3) == 5"], predictions) == expected_score
 
 
-def test_imports_and_helpers_reach_original_execution_metric(mbpp):
+def test_imports_and_helpers_reach_owned_execution_metric(mbpp):
     response = """```python
 import math
 

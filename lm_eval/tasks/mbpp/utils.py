@@ -1,14 +1,5 @@
-import evaluate as hf_evaluate
-
+from lm_eval.tasks import _code_eval as pass_at_k
 from lm_eval.tasks._code_extraction import extract_python
-
-
-pass_at_k = hf_evaluate.load("code_eval")
-
-# run simple test to check code execution is enabled before model generation
-test_cases = ["assert add(2, 3)==5"]
-candidates = [["def add(a,b): return a*b"]]
-results = pass_at_k.compute(references=test_cases, predictions=candidates, k=[1])
 
 
 def pass_at_1(references: str | list[str], predictions: str | list[list[str]]) -> float:

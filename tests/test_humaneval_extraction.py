@@ -4,9 +4,7 @@ import importlib.util
 import runpy
 import sys
 from pathlib import Path
-from unittest.mock import Mock
 
-import evaluate
 import pytest
 from datasets import Dataset
 
@@ -27,8 +25,6 @@ FULL = "def total(values):\n    return sum(values)\n"
 
 @pytest.fixture
 def utils(monkeypatch):
-    # Extraction/config tests do not download or execute the external code metric.
-    monkeypatch.setattr(evaluate, "load", Mock(return_value=Mock()))
     path = TASK_DIR / "utils.py"
     name = "lm_eval.tasks.humaneval.utils"
     spec = importlib.util.spec_from_file_location(name, path)
@@ -242,16 +238,16 @@ def test_fence_lines_inside_fenced_strings_are_not_delimiters(utils, prefix):
 
 
 @pytest.fixture(scope="module")
-def execution_metric():
+def allow_code_execution():
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("HF_ALLOW_CODE_EVAL", "1")
-        yield evaluate.load("code_eval")
+        yield
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
 @pytest.mark.parametrize("literal_char", ["\u2028", "\u2029", "\f", "\v", "\x85", "\x1c", "\x1d", "\x1e"])
 def test_physical_newlines_preserve_literal_fences_and_execution(
-    execution_metric, utils, monkeypatch, newline, literal_char
+    allow_code_execution, utils, monkeypatch, newline, literal_char
 ):
     value = literal_char * 3 + "\n```\n"
     source = newline.join(
@@ -268,8 +264,6 @@ def test_physical_newlines_preserve_literal_fences_and_execution(
     compile(source, "<original>", "exec")
     response = "```python" + newline + source + "```"
     assert utils.build_predictions([[response, source]], [DOC]) == [[source, source]]
-    monkeypatch.setattr(utils, "compute_", execution_metric)
-
     def download(task, *args, **kwargs):
         task.dataset = {"test": Dataset.from_list([DOC])}
 
@@ -310,10 +304,8 @@ def test_physical_newlines_preserve_literal_fences_and_execution(
     ],
 )
 def test_public_filter_and_process_results_preserve_functional_outcomes(
-    execution_metric, utils, monkeypatch, response, expected_score
+    allow_code_execution, utils, monkeypatch, response, expected_score
 ):
-    monkeypatch.setattr(utils, "compute_", execution_metric)
-
     def download(task, *args, **kwargs):
         task.dataset = {"test": Dataset.from_list([DOC])}
 

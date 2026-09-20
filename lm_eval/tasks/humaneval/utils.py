@@ -1,14 +1,7 @@
 import ast
 
-import evaluate as hf_evaluate
-
+from lm_eval.tasks import _code_eval as compute_
 from lm_eval.tasks._code_extraction import extract_python
-
-
-compute_ = hf_evaluate.load("code_eval")
-test_cases = ["assert add(2, 3)==5"]
-candidates = [["def add(a,b): return a*b"]]
-results = compute_.compute(references=test_cases, predictions=candidates, k=[1])
 
 
 def pass_at_k(
