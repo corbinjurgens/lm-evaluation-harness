@@ -25,4 +25,4 @@ fewshot_config:
   sampler: first_n
   samples: !function utils.list_fewshot_samples
 metadata:
-  version: 2.0
+  version: 3.0

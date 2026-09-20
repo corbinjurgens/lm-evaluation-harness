@@ -329,7 +329,7 @@ def test_task_family_prompts_and_metrics(mbpp, name, dataset, shots):
     assert config["task"] == name
     assert config["dataset_path"] == dataset
     assert config["num_fewshot"] == shots
-    assert config["metadata"]["version"] == 2.0
+    assert config["metadata"]["version"] == 3.0
     assert config.get("gen_prefix", "") == ""
     assert config["generation_kwargs"] == {
         "max_gen_toks": 4096,

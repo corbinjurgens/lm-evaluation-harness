@@ -340,17 +340,17 @@ def test_string_whitespace_preserves_runtime_value(utils, tmp_path):
 @pytest.mark.parametrize(
     "name,version,repeats,k,dataset",
     [
-        ("humaneval", 2.0, 1, [1], "openai/openai_humaneval"),
-        ("humaneval_instruct", 5.0, 1, [1], "openai/openai_humaneval"),
-        ("humaneval_64", 2.0, 64, [2, 8, 16, 32, 64], "openai/openai_humaneval"),
+        ("humaneval", 3.0, 1, [1], "openai/openai_humaneval"),
+        ("humaneval_instruct", 6.0, 1, [1], "openai/openai_humaneval"),
+        ("humaneval_64", 3.0, 64, [2, 8, 16, 32, 64], "openai/openai_humaneval"),
         (
             "humaneval_64_instruct",
-            4.0,
+            5.0,
             64,
             [2, 8, 16, 32, 64],
             "openai/openai_humaneval",
         ),
-        ("humaneval_plus", 2.0, 1, [1], "evalplus/humanevalplus"),
+        ("humaneval_plus", 3.0, 1, [1], "evalplus/humanevalplus"),
     ],
 )
 def test_public_task_config_and_prompt_filter_seam(
