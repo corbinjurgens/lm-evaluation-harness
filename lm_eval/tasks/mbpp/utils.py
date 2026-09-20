@@ -1,23 +1,19 @@
+import ast
+import keyword
 import re
-from typing import Union
 
 import evaluate as hf_evaluate
 
 
-try:
-    pass_at_k = hf_evaluate.load("code_eval")
+pass_at_k = hf_evaluate.load("code_eval")
 
-    # run simple test to check code execution is enabled before model generation
-    test_cases = ["assert add(2, 3)==5"]
-    candidates = [["def add(a,b): return a*b"]]
-    results = pass_at_k.compute(references=test_cases, predictions=candidates, k=[1])
-except Exception as e:
-    raise e
+# run simple test to check code execution is enabled before model generation
+test_cases = ["assert add(2, 3)==5"]
+candidates = [["def add(a,b): return a*b"]]
+results = pass_at_k.compute(references=test_cases, predictions=candidates, k=[1])
 
 
-def pass_at_1(
-    references: Union[str, list[str]], predictions: Union[str, list[list[str]]]
-) -> float:
+def pass_at_1(references: str | list[str], predictions: str | list[list[str]]) -> float:
     if isinstance(references, str):
         references = [references]
     if isinstance(predictions[0], str):
@@ -29,19 +25,55 @@ def pass_at_1(
     )[0]["pass@1"]
 
 
+_CODE_FENCE = re.compile(
+    r"^[ \t]{0,3}```(?P<language>[^\n`]*)\n(?P<code>.*?)^[ \t]{0,3}```[ \t]*(?=\n|$)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _is_prose(line: str) -> bool:
+    """Recognize plain explanatory text without discarding Python statements."""
+    if line != line.lstrip() or not re.fullmatch(
+        r"[A-Za-z][A-Za-z0-9 ,.!?'’:-]*", line
+    ):
+        return False
+    if len(line.split()) < 3 or keyword.iskeyword(line.split(maxsplit=1)[0]):
+        return False
+    try:
+        ast.parse(line)
+    except SyntaxError:
+        return True
+    return False
+
+
 def extract_code_blocks(text: str) -> str:
-    # Pattern to match ```...``` blocks
-    pattern = r"```(?:\w+)?\n?(.*?)\n?```"
-    # (+ ```) as we add the opening "```python" to the gen_prefix
-    matches = re.findall(pattern, r"```" + text, re.DOTALL)
-    # if no matches, try to match ```...``` blocks (after removing the language)
-    if not matches:
-        text_without_lang = re.sub(r"```python", "```", text)
-        matches = re.findall(pattern, text_without_lang, re.DOTALL)
-    if not matches:
-        return ""
-    else:
-        return matches[0]
+    """Extract complete Python answers without consulting reference tests.
+
+    Keep all Python blocks in response order so imports and helper definitions in
+    separate blocks survive. Raw code is also accepted. Only unambiguous prose
+    at its edges is removed; assertions and malformed code remain executable
+    candidates and are judged by the original code execution metric.
+    """
+    text = text.replace("\r\n", "\n").strip()
+    blocks = list(_CODE_FENCE.finditer(text))
+    if blocks:
+        return "\n\n".join(
+            block["code"].strip()
+            for block in blocks
+            if block["language"].strip().lower() in {"", "python", "py", "python3"}
+        )
+
+    # Older assistant-prefill responses may contain only the closing fence.
+    if text.endswith("\n```") and "```" not in text[:-4]:
+        text = text[:-4].rstrip()
+    lines = text.splitlines()
+    while lines and (not lines[0].strip() or _is_prose(lines[0])):
+        lines.pop(0)
+    while lines and (not lines[-1].strip() or _is_prose(lines[-1])):
+        lines.pop()
+    if lines and lines[0].casefold() in {"solution:", "python:", "code:"}:
+        lines.pop(0)
+    return "\n".join(lines)
 
 
 def build_predictions(resps: list[list[str]], docs: list[dict]) -> list[list[str]]:
