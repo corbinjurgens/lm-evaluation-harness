@@ -130,6 +130,25 @@ For that development install only, both import path and editable project locatio
 must refer to the checkout. It is neither the pinned image nor a code sandbox;
 do not execute untrusted generated programs on the host.
 
+For the normal four-task workflow, use the platform entry point and follow its
+prompts. It creates `.venv` when absent, builds the pinned image when absent, runs
+a one-sample check, then runs HumanEval, MBPP, IFEval and GSM8K into dated result
+folders:
+
+```bash
+# macOS or Linux
+./run-all-benchmarks.sh
+```
+
+```powershell
+# Windows PowerShell with Docker Desktop using Linux containers
+.\run-all-benchmarks.ps1
+```
+
+Both entry points call the same standard-library Python driver and the same
+two-stage Docker launcher. Windows does not require Bash or WSL for the host
+command; the scoring image itself remains Linux-based.
+
 ### One host command: generate, then score offline
 
 Save this valid JSON as `benchmark.json` on the host, replacing the model/endpoint
