@@ -1,0 +1,23 @@
+services:
+  lm-evaluator:
+    image: ${LM_EVAL_IMAGE:-lm-eval-fork:local}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: lm_eval_sandbox
+    user: "65532:65532"
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: ${LM_EVAL_MEMORY:-512m}
+    memswap_limit: ${LM_EVAL_MEMORY:-512m}
+    cpus: 1.0
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+    environment:
+      HF_ALLOW_CODE_EVAL: ""
+    # Generation/debug only. Use scripts/run_benchmark.py for isolated scoring.
+    command: ["python", "-c", "import time; time.sleep(604800)"]
+    restart: unless-stopped
