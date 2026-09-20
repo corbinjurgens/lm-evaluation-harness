@@ -1,8 +1,6 @@
-import ast
-import keyword
-import re
-
 import evaluate as hf_evaluate
+
+from lm_eval.tasks._code_extraction import extract_python
 
 
 pass_at_k = hf_evaluate.load("code_eval")
@@ -25,55 +23,9 @@ def pass_at_1(references: str | list[str], predictions: str | list[list[str]]) -
     )[0]["pass@1"]
 
 
-_CODE_FENCE = re.compile(
-    r"^[ \t]{0,3}```(?P<language>[^\n`]*)\n(?P<code>.*?)^[ \t]{0,3}```[ \t]*(?=\n|$)",
-    re.MULTILINE | re.DOTALL,
-)
-
-
-def _is_prose(line: str) -> bool:
-    """Recognize plain explanatory text without discarding Python statements."""
-    if line != line.lstrip() or not re.fullmatch(
-        r"[A-Za-z][A-Za-z0-9 ,.!?'’:-]*", line
-    ):
-        return False
-    if len(line.split()) < 3 or keyword.iskeyword(line.split(maxsplit=1)[0]):
-        return False
-    try:
-        ast.parse(line)
-    except SyntaxError:
-        return True
-    return False
-
-
 def extract_code_blocks(text: str) -> str:
-    """Extract complete Python answers without consulting reference tests.
-
-    Keep all Python blocks in response order so imports and helper definitions in
-    separate blocks survive. Raw code is also accepted. Only unambiguous prose
-    at its edges is removed; assertions and malformed code remain executable
-    candidates and are judged by the original code execution metric.
-    """
-    text = text.replace("\r\n", "\n").strip()
-    blocks = list(_CODE_FENCE.finditer(text))
-    if blocks:
-        return "\n\n".join(
-            block["code"].strip()
-            for block in blocks
-            if block["language"].strip().lower() in {"", "python", "py", "python3"}
-        )
-
-    # Older assistant-prefill responses may contain only the closing fence.
-    if text.endswith("\n```") and "```" not in text[:-4]:
-        text = text[:-4].rstrip()
-    lines = text.splitlines()
-    while lines and (not lines[0].strip() or _is_prose(lines[0])):
-        lines.pop(0)
-    while lines and (not lines[-1].strip() or _is_prose(lines[-1])):
-        lines.pop()
-    if lines and lines[0].casefold() in {"solution:", "python:", "code:"}:
-        lines.pop(0)
-    return "\n".join(lines)
+    """Remove explicit Markdown envelopes, never program statements or spaces."""
+    return extract_python(text)
 
 
 def build_predictions(resps: list[list[str]], docs: list[dict]) -> list[list[str]]:

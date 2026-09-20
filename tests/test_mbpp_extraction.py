@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from datasets import Dataset
 
+from lm_eval.api.instance import Instance
 from lm_eval.api.task import ConfigurableTask
 from lm_eval.tasks import TaskManager
 from lm_eval.tasks._yaml_loader import load_yaml
@@ -24,26 +25,30 @@ def mbpp():
     [
         ("def add(a, b):\n    return a + b", "def add(a, b):\n    return a + b"),
         (
+            "```python\ndef add(a, b): return a + b\n```\n   Explanation\n Explanation",
+            "def add(a, b): return a + b\n",
+        ),
+        (
             "Here is the solution:\n```python\ndef add(a, b):\n    return a + b\n```\nThis returns the sum.",
-            "def add(a, b):\n    return a + b",
+            "def add(a, b):\n    return a + b\n",
         ),
         (
             "```PYTHON\r\ndef add(a, b):\r\n    return a + b\r\n```",
-            "def add(a, b):\n    return a + b",
+            "def add(a, b):\r\n    return a + b\r\n",
         ),
-        ("```\ndef add(a, b): return a + b\n```", "def add(a, b): return a + b"),
-        ("def add(a, b): return a + b\n```", "def add(a, b): return a + b"),
+        ("```\ndef add(a, b): return a + b\n```", "def add(a, b): return a + b\n"),
+        ("def add(a, b): return a + b\n```", "def add(a, b): return a + b\n"),
         (
             "Here is the solution:\n\ndef add(a, b):\n    return a + b\n\nThis returns the sum.",
-            "def add(a, b):\n    return a + b",
+            "Here is the solution:\n\ndef add(a, b):\n    return a + b\n\nThis returns the sum.",
         ),
         (
             "```python\nimport math\n```\n```python\ndef root(n):\n    return math.sqrt(n)\n```",
-            "import math\n\ndef root(n):\n    return math.sqrt(n)",
+            "import math\n\ndef root(n):\n    return math.sqrt(n)\n",
         ),
         (
             "```text\nAn illustrative example\n```\n```py\ndef add(a, b): return a + b\n```",
-            "def add(a, b): return a + b",
+            "def add(a, b): return a + b\n",
         ),
         (
             "assert False\ndef add(a, b): return a + b",
@@ -55,8 +60,8 @@ def mbpp():
         ),
         ("", ""),
         ("  \n ", ""),
-        ("```python\ndef broken(\n```", "def broken("),
-        ("```python\ndef unfinished():", "```python\ndef unfinished():"),
+        ("```python\ndef broken(\n```", "def broken(\n"),
+        ("```python\ndef unfinished():", ""),
     ],
 )
 def test_extract_complete_code_preserves_program(mbpp, response, expected):
@@ -106,6 +111,135 @@ def test_filter_does_not_infer_function_name_from_reference_assertion(mbpp):
     docs = [{"test_list": ["assert sorted(answer()) == [1, 2]"]}]
     assert mbpp.build_predictions([[response, "pass"]], docs) == [[response, "pass"]]
     assert mbpp.pass_at_1(docs[0]["test_list"], [[response]]) == 1.0
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def add(a, b):\n    return """\n```python\ndef add(a, b):\n    return a + b\n```\n"""\n',
+        'def add(a, b):\n    return """a\n    \nb"""\n',
+        'def add(a, b):\n    return f"""a\n```\n{a}\n"""\n',
+        "match True, False:\n    case _:\n        def add(a, b):\n            return a + b\n",
+        "def add(a, b): return a + b\nresult is not None:\n",
+        "\n\ndef add(a, b): return a + b\n\n",
+    ],
+)
+@pytest.mark.parametrize("fenced", [False, True])
+def test_program_bytes_survive_raw_or_longer_fenced_envelope(mbpp, source, fenced):
+    response = f"````python\n{source}````" if fenced else source
+    assert mbpp.build_predictions([[response, "", source]], [{}]) == [
+        [source, "", source]
+    ]
+
+
+@pytest.mark.parametrize("mark", ["```", "````", "~~~"])
+def test_fence_delimiters_pair_by_type_and_length(mbpp, mark):
+    source = "def add(a, b): return a + b\n"
+    response = f"{mark}text\nExample\n{mark}\n{mark}python\n{source}{mark}"
+    assert mbpp.extract_code_blocks(response) == source
+
+
+def test_legacy_closing_fence_cannot_hide_a_later_revision(mbpp):
+    response = "def add(a, b): return a + b\n```\n```python\ndef add(a, b): return (\n"
+    assert mbpp.extract_code_blocks(response) == response
+
+
+@pytest.mark.parametrize("prefix", ["", "f"])
+def test_fence_lines_inside_fenced_strings_are_not_delimiters(mbpp, prefix):
+    source = f'def add(a, b):\n    return {prefix}"""a\n```\n{{a}}\n"""\n'
+    assert mbpp.extract_code_blocks(f"```python\n{source}```") == source
+    malformed = source + "result is not None:\n"
+    assert mbpp.extract_code_blocks(malformed) == malformed
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize(
+    "literal_char", ["\u2028", "\u2029", "\f", "\v", "\x85", "\x1c", "\x1d", "\x1e"]
+)
+def test_physical_newlines_preserve_literal_fences_and_execution(
+    mbpp, monkeypatch, newline, literal_char
+):
+    value = literal_char * 3 + "\n```\n"
+    source = newline.join(
+        [
+            "def add(a, b):",
+            '    note = """' + literal_char * 3,
+            "```",
+            '"""',
+            f"    assert note == {value!r}",
+            "    return a + b",
+            "",
+        ]
+    )
+    compile(source, "<original>", "exec")
+    response = "```python" + newline + source + "```"
+    assert mbpp.build_predictions([[response, source]], [{}]) == [[source, source]]
+    doc = {"text": "Add two numbers.", "test_list": ["assert add(2, 3) == 5"] * 3}
+
+    def download(task, *args, **kwargs):
+        task.dataset = {"test": Dataset.from_list([doc])}
+
+    monkeypatch.setattr(ConfigurableTask, "download", download)
+    task_path = Path(__file__).resolve().parents[1] / "lm_eval/tasks/mbpp/mbpp.yaml"
+    task = ConfigurableTask(config=load_yaml(task_path))
+    task._instances = [
+        Instance("generate_until", doc, ("prompt", {}), 0, resps=[response])
+    ]
+    task.apply_filters()
+    filtered = next(iter(task.instances[0].filtered_resps.values()))
+    assert filtered == [source]
+    assert task.process_results(doc, [filtered]) == {"pass_at_1": 1.0}
+
+
+@pytest.mark.parametrize(
+    "response,expected_score",
+    [
+        (
+            'def add(a, b):\n    return """\n```python\ndef add(a, b):\n    return a + b\n```\n"""\n',
+            0.0,
+        ),
+        ("def add(a, b): return a + b\nresult is not None:\n", 0.0),
+        (
+            "match True, False:\n    case _:\n        def add(a, b):\n            return a + b\n",
+            1.0,
+        ),
+        (
+            "```python\nassert False\n```\n```python\ndef add(a, b): return a + b\n```",
+            0.0,
+        ),
+        (
+            "```python\ndef add(a, b): return a + b\n```\n```python\ndef add(a, b): return a * b\n```",
+            0.0,
+        ),
+        (
+            "```python\ndef add(a, b): return a + b\nsaved_add = add\n```\n```python\ndef add(a, b): return saved_add(a, b)\n```",
+            1.0,
+        ),
+        (
+            "```python\ndef add(a, b): return a + b\n```\n```python\ndef add(a, b): return (\n",
+            0.0,
+        ),
+        ("def add[T](a: T, b: T): return a + b\n", 1.0),
+    ],
+)
+def test_public_filter_and_process_results_preserve_functional_outcomes(
+    mbpp, monkeypatch, response, expected_score
+):
+    doc = {"text": "Add two numbers.", "test_list": ["assert add(2, 3) == 5"] * 3}
+
+    def download(task, *args, **kwargs):
+        task.dataset = {"test": Dataset.from_list([doc])}
+
+    monkeypatch.setattr(ConfigurableTask, "download", download)
+    task_path = Path(__file__).resolve().parents[1] / "lm_eval/tasks/mbpp/mbpp.yaml"
+    task = ConfigurableTask(config=load_yaml(task_path))
+    task._instances = [
+        Instance("generate_until", doc, ("prompt", {}), 0, resps=[response])
+    ]
+    task.apply_filters()
+    filtered = next(iter(task.instances[0].filtered_resps.values()))
+    assert len(filtered) == 1
+    assert task.process_results(doc, [filtered]) == {"pass_at_1": expected_score}
 
 
 @pytest.mark.parametrize("name", ["mbpp", "mbpp_instruct", "mbpp_plus"])
