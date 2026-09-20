@@ -80,18 +80,48 @@ finish reason, response shape and allowlisted numeric token usage. Authorization
 headers, URLs, arbitrary extra fields, exception text and reasoning content are
 not logged. **Prompts and final answers are logged and can contain sensitive
 data**; this is not a general-purpose redactor. Logged controls prove what was
-sent, not that the remote server honored it. There is no automatic comprehensive
-runtime/dataset/model provenance manifest yet.
+sent, not that the remote server honored it. The host launcher below enables this
+sidecar automatically and records runtime/dataset provenance in a separate manifest.
 
 ### Install and run this fork
 
-Use Python 3.13 for the current local environment. The observed Python 3.14
-installation could not resolve the IFEval dependency chain on this platform.
-Install the checkout, not the normal PyPI package:
+Use Docker with Linux containers and host Python 3.9 or newer. The image uses
+Python 3.13; the observed Python 3.14 installation could not resolve the IFEval
+dependency chain on this platform. Install this fork, not the normal PyPI package.
+
+Publication caveat (2026-09-20): these corrections are local ahead of the last
+verified remote branch at `e0c06df1`. A clone of that remote alone does not yet
+contain the full workflow. First publish the intended fork revision, or transfer
+the corrected local checkout to the other PC; verify the revision and presence
+of `scripts/run_benchmark.py` before building. Once available there:
 
 ```bash
 git clone --branch codex/chat-complete-evals https://github.com/corbinjurgens/lm-evaluation-harness.git
 cd lm-evaluation-harness
+git rev-parse HEAD
+docker compose -f docker/compose.yaml config
+docker compose -f docker/compose.yaml build
+python3 scripts/run_benchmark.py --help
+```
+
+The image installs the fork as a wheel: source is baked in, not bind-mounted or
+editable. Rebuild after pulling source/lock changes. `docker/Dockerfile` pins
+build/runtime image digests, installs hashed `docker/requirements.lock` dependencies,
+and bakes a revision/hash-pinned NLTK resource for IFEval. The launcher resolves
+`lm-eval-fork:local` (or `--image`) to one immutable image ID for both phases.
+
+The optional persistent `lm_eval_sandbox` service is generation/debug only; it is
+not needed by the launcher. On this Mac,
+`/Users/apple/lm-evaluation-harness/docker-compose.yml` extends the fork's
+`docker/compose.yaml` and preserves old results at `/legacy-workspace:ro`.
+It no longer mounts `/workspace` or installs dependencies on startup. The image
+has no shell; inspect it with `docker exec lm_eval_sandbox python ...`, not `sh`.
+This service has been activated locally with the baked evaluator; the remote
+model server is a separate, unverified deployment.
+
+For optional source development outside Docker:
+
+```bash
 python3.13 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[api,ifeval]'
@@ -99,53 +129,122 @@ python -c 'import lm_eval; print(lm_eval.__file__)'
 python -m pip show lm_eval
 ```
 
-Both import path and editable project location must refer to this checkout.
-These commands are a source install, not a dependency lock or code sandbox.
-Do not replace it with `pip install lm-eval`. The current Mac Compose file lives
-outside this fork at `/Users/apple/lm-evaluation-harness/docker-compose.yml`;
-it mounts `/Users/apple/personal/lm-evaluation-harness` at `/workspace` and installs
-`.[api,ifeval]` editable at startup from `dhi.io/python:3.13-dev`.
-That mutable image tag and startup dependency resolution are not a pinned build.
+For that development install only, both import path and editable project location
+must refer to the checkout. It is neither the pinned image nor a code sandbox;
+do not execute untrusted generated programs on the host.
 
-For example, with `MODEL`, `UNSLOTH_URL` (host:port), and credentials already set,
-run a non-code smoke test inside that container:
+### One host command: generate, then score offline
 
-```bash
-export RESULT_FOLDER=/workspace/results_gsm8k_fresh
-mkdir -p "$RESULT_FOLDER"
-lm-eval run --model local-chat-completions \
-  --model_args "model=${MODEL},base_url=http://${UNSLOTH_URL}/v1/chat/completions,num_concurrent=4,tokenizer_backend=None,transport_log=${RESULT_FOLDER}/transport.jsonl" \
-  --apply_chat_template --log_samples --limit 10 \
-  --tasks gsm8k_cot_zeroshot \
-  --gen_kwargs "temperature=1.0,top_p=1.0,reasoning_effort=low,max_gen_toks=4096" \
-  --output_path "$RESULT_FOLDER"
+Save this valid JSON as `benchmark.json` on the host, replacing the model/endpoint
+with the actual deployment. It is an explicit GPT-OSS low-effort smoke profile,
+not a universal best setting. The model PC was not reachable during the last
+health probe, so this address is an example, not a verified live endpoint.
+
+```json
+{
+  "tasks": ["humaneval", "mbpp", "ifeval", "gsm8k_cot_zeroshot"],
+  "model": "unsloth/gpt-oss-20b-GGUF",
+  "base_url": "http://192.168.11.49:8888/v1/chat/completions",
+  "gen_kwargs": {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "reasoning_effort": "low",
+    "max_gen_toks": 4096
+  },
+  "seed": 1234,
+  "timeout": 300,
+  "num_concurrent": 1,
+  "max_retries": 3,
+  "profile": "practical",
+  "limit": 1
+}
 ```
 
-The example is a GPT-OSS low-effort profile, not a universal best setting. Omit
-unsupported reasoning controls for other families. Limited runs validate plumbing,
-not benchmark quality. Fresh comparisons omit **both** `--use_cache` (responses)
-and `--cache_requests` (preprocessed requests); a new output folder alone does not
-invalidate either cache. Generic cache identity limitations have not been fixed
-in core cache code. Use another fresh output/log directory for the full run.
+Load `OPENAI_API_KEY` and, if needed, `HF_TOKEN` into the host environment from a
+protected source; never put credentials in the JSON. Run from the fork checkout:
+
+```bash
+mkdir -p benchmark-runs
+python3 scripts/run_benchmark.py \
+  --config benchmark.json \
+  --output-dir benchmark-runs/gpt-oss-smoke-001 \
+  --image lm-eval-fork:local
+```
+
+The output parent must exist and the run directory must not exist. Config/output
+paths must be real paths without symlink ancestors or commas; on macOS use
+`/private/tmp`, not its `/tmp` symlink, for temporary host paths. Containers use
+bridge networking for generation: on Docker Desktop, a host-local endpoint uses
+`host.docker.internal`, not container `localhost`.
+
+The launcher supports only the normal task families in the version table above,
+with `local-chat-completions` and chat templating. It does not expose arbitrary
+tasks, plugins, raw completions or cache flags. `temperature` and `max_gen_toks`
+are required in `gen_kwargs`. Omit unsupported model-family reasoning controls.
+Remove `limit` for a full selected split, or use `samples` with original document
+IDs for every selected task; never combine those options. One config applies the
+same generation overrides to every selected task, so use separate runs when
+tasks need different budgets/profiles.
+
+Both request and response caches are forced off. This avoids reuse despite
+incomplete generic cache identities; it does not repair core cache keying. Use a
+fresh output directory for every full run, configuration change or retry.
+
+Default container bounds are 512 MiB memory (no additional swap), 128 MiB tmpfs,
+128 processes and one CPU. Each phase has an 86,400-second deadline; transfers
+are capped at 128 MiB per artifact. Override with `--memory-mib`, `--tmpfs-mib`,
+`--pids-limit`, `--cpus`, `--generation-timeout`, `--scoring-timeout`, and
+`--max-artifact-mib`. Tmpfs must be smaller than memory. These are small-smoke
+defaults, not proven full-dataset capacity, especially for 64-repeat tasks;
+allow enough Docker VM memory and record larger declared bounds when needed.
+Overflow fails the run instead of truncating a published artifact.
+
+Generation has network access and only the explicitly forwarded credentials; it
+does not execute candidates. Scoring uses the same image ID, no network or
+credentials, a read-only root and bundle-file mount, no source/output host mount,
+UID 65532, dropped capabilities, no-new-privileges, an init reaper and checked
+resource bounds. Docker reduces risk; it is not an absolute defense against
+hostile programs or container/kernel escapes. Do not add privileged mounts.
+
+Only `RUN/completed/` is a published successful run, created after both phases,
+identity checks and owned-container cleanup succeed:
+
+| File | Meaning |
+| --- | --- |
+| `bundle.json` | `lm-eval-offline-bundle-v1`: original docs/references, ordered raw candidates, document IDs, task versions, dataset fingerprints, hashes and generation provenance |
+| `scores.json` | `lm-eval-offline-results-v1`: actual task filters/metrics/aggregates and per-document filtered answers; not stock harness JSON and no bootstrap stderr estimates |
+| `transport.jsonl` | HTTP-attempt diagnostics with sent controls/seeds, final content, finish reason and usage |
+| `manifest.json` | `lm-eval-isolated-run-v1`: immutable image ID/digests, installed source/helper hashes, lock hash, Python, task/data identities, limits and sanitized actual scoring-container inspection |
+
+`RUN/.partial/` retains bounded diagnostics, config, raw artifacts and owned
+container IDs, including on failure. Inspect it if no `completed/` exists; do not
+treat partial scores as a result or overwrite the failed run on retry. Artifacts
+contain sensitive prompts/answers/code even though credential environment values
+are excluded from diagnostic inspection. Hashes detect accidental changes, not
+authenticated provenance or safe code.
 
 Declare whether a comparison uses matched sampling/budget controls or practical
-model-specific profiles. For example, temperature 1 for GPT-OSS versus omitted
-temperature (0 on this adapter) for Qwen is not a matched sampling comparison.
-Record evaluator revision/dirty state, task versions, dataset identity, full
-generation settings, seeds, concurrency, timeout, environment/image identity,
-server binary and launch flags, GGUF identity, effective template/date/context
-settings, and execution limits. With `tokenizer_backend=None`, the client cannot
-establish tokenized context fit. Inspect raw and filtered answers plus the
-transport log before trusting a full result.
+model-specific profiles. Earlier direct runs using temperature 1 for GPT-OSS
+versus omitted temperature (0 on this adapter) for Qwen were not matched sampling
+comparisons; the launcher now requires an explicit temperature.
+The manifest records installed-code identity, not a checkout revision/dirty-state
+attestation. Keep the evaluator revision/build record as well. The optional
+`server` JSON object accepts `revision`, `binary_sha256`, `model_sha256`,
+`template_sha256`, `reasoning_format`, `reasoning_effort`, and `context_size`.
+These are user-supplied facts, not server verification; omission remains unknown.
+Also retain effective launch flags/template date when relevant. With
+`tokenizer_backend=None`, the client cannot establish tokenized context fit.
+Inspect raw and filtered answers plus the transport log before trusting a full
+result. A `matched` profile label does not enforce matched controls across runs.
 
-### Server responsibilities and unfinished deployment
+### Server responsibilities and code execution
 
 The [llama.cpp fork](https://github.com/corbinjurgens/llama.cpp), branch
 `gpt-oss-final-constrain`, contains separate fixes: `fe79b4036` accepts an optional
 GPT-OSS final-channel constraint tag; `775f85037` guards optional JSON-schema
 `items` in the template. IFEval remains unchanged in this evaluator. Task-level
 IFEval allowance is 1,280 tokens: a model-argument fallback does not override it;
-use explicit `--gen_kwargs` for a larger budget. GPT-OSS low effort still reasons;
+the launcher's explicit `gen_kwargs.max_gen_toks` overrides it. GPT-OSS low effort still reasons;
 it is not a no-thinking mode.
 
 Verify the loaded server on the model PC, not just this source checkout. Final-only
@@ -157,7 +256,7 @@ restore the old `--chat-template gpt-oss` workaround under `--jinja`, where that
 argument can be interpreted as literal template text. No fresh cross-model
 inference or remote deployment verification is claimed by these local fixes.
 
-**Scoring backend repaired locally; isolated deployment still pending.** Normal
+**Scoring backend repaired locally.** Normal
 HumanEval/MBPP helpers now use the fork-owned `lm_eval/tasks/_code_eval.py` backend
 and `_code_eval_worker.py`, not a dynamically downloaded `evaluate` metric.
 Importing task helpers no longer executes a candidate; `HF_ALLOW_CODE_EVAL=1` is
@@ -182,27 +281,27 @@ address-space limit is optional and unset by default; deployment-level memory
 and process limits are still necessary. Worker guard attribution is retained in
 the source and `licenses/code_eval-APACHE-2.0.txt`.
 
-The existing `lm_eval_sandbox` has network access and a writable source mount; its
-name does not make it secure for untrusted generated Python. Coding evaluation
-requires `HF_ALLOW_CODE_EVAL=1` and `--confirm_run_unsafe_code`, but those flags
-only acknowledge risk. A pinned, credential-free, network-disabled execution
-boundary with read-only inputs, resource limits and an init reaper remains
-pending. The approved design is a host launcher that generates first and then
-scores in a separate offline container; implementation is in progress.
-Digest-pinned image/dependency build assets now exist in `docker/Dockerfile` and
-`docker/requirements.lock` and have passed local build checks. A final source
-rebuild and the complete two-stage workflow verification remain pending. There
-is no finished safe launcher to invoke yet.
+The launcher sets `HF_ALLOW_CODE_EVAL=1` only for offline scoring and uses
+predict-only generation. Direct CLI coding runs still require both that runtime
+opt-in and `--confirm_run_unsafe_code`; those flags only acknowledge risk and do
+not provide isolation. Use the host launcher for the supported daily workflow.
+Local real-Docker HumanEval/GSM fixture runs verified scoring and isolation with
+a deterministic HTTP responder, not a real model. The last health probe to
+`192.168.11.49:8888` timed out. The loaded llama.cpp binary/template and fresh
+GPT-OSS/non-GPT-OSS runs remain unverified.
 
 ### Regression checks and historical experiments
 
 The focused regression suites are `tests/test_humaneval_extraction.py`,
 `tests/test_mbpp_extraction.py`, `tests/test_gsm8k_zeroshot_format.py`,
-`tests/models/test_api_diagnostics.py`, and `tests/test_code_eval_backend.py`,
-alongside the existing API suites and normal-task integration fixtures.
-Run them with `python -m pytest -q` and the desired paths in a dependency-equipped,
-isolated test environment. Existing tokenizer tests additionally require
-`transformers`; the API-only production environment does not install it.
+`tests/models/test_api_diagnostics.py`, `tests/test_code_eval_backend.py`,
+`tests/test_benchmark_bundle.py`, and `tests/test_benchmark_launcher.py`, alongside
+the existing API suites and normal-task integration fixtures.
+Run them with `python -m pytest -q` and the desired checkout paths in an isolated
+test environment. The image lock includes the focused test tools and
+`transformers` needed by tokenizer fixtures, but the production image does not
+copy the checkout's test directory. The launcher unit tests also run on host
+Python without Docker: `python3 -m unittest discover -s tests -p test_benchmark_launcher.py`.
 
 Historical v1/v2 tasks in [diagnostics/chat_coding_tasks](diagnostics/chat_coding_tasks/README.md)
 are not the new comparison route. Their YAML imports live Python helpers, so

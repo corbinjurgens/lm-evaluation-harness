@@ -9,8 +9,9 @@ accepted block rejects the envelope rather than rescuing an earlier answer.
 Datasets and reference tests are unchanged. Normal tasks now use the fork-owned
 fresh-process execution backend; the old 64-candidate threaded-fork failure is
 repaired locally. Helpers no longer download the metric or execute code at
-import time; scoring checks the runtime execution opt-in. Safe offline deployment
-is a separate, unfinished step. See the [fork README](../../README.md#this-fork-chat-model-benchmark-corrections)
+import time; scoring checks the runtime execution opt-in. The host launcher
+`scripts/run_benchmark.py` separates networked generation from offline scoring
+for supported normal names. See the [fork README](../../README.md#this-fork-chat-model-benchmark-corrections)
 for current versions, API diagnostics and deployment limitations.
 GSM8K version 5 requests the strict answer format and corrects its numeric grammar.
 IFEval itself is unchanged; the GPT-OSS parser repair belongs in the llama.cpp
@@ -30,20 +31,25 @@ evaluator revision, dependencies, server, data and generation settings. In
 particular, v1's recorded reasoning setting does not make a current-checkout
 rescore identical to the original run.
 
-Load the historical definitions only when reproducing one of those runs:
+Load the historical definitions only in the corresponding old environment
+(this example assumes its checkout is mounted at `/workspace`):
 
 ```bash
 lm-eval ls tasks --include_path /workspace/diagnostics/chat_coding_tasks
 ```
 
-For current runs, supply model-specific reasoning controls through
-`--gen_kwargs`, while keeping normal task names for every model. Record the
-result's `git_hash`, task versions, and generation settings. The changed task
-contracts require fresh cross-model runs with both request and response caching
-disabled (omit `--cache_requests` and `--use_cache`); scores are not
+For current runs, supply model-specific reasoning controls in the host launcher's
+JSON `gen_kwargs`, while keeping normal task names for every model. Keep its
+manifest, task versions and generation settings, plus a separate checkout/build
+revision record; the offline result schema does not contain the stock result's
+`git_hash`. The launcher forces request and response caches off. The changed task
+contracts require fresh cross-model runs; scores are not
 interchangeable with upstream or historical v1/v2 results.
 
-Executing generated code requires `HF_ALLOW_CODE_EVAL=1`, explicit
-`--confirm_run_unsafe_code`, timeouts, and an isolated evaluator. The current
-networked, writable-source Docker setup is not secure untrusted-code isolation;
-the pinned offline workflow is still pending.
+The new host launcher does not accept these custom historical names. For current
+normal-name runs it enables code execution only in the offline scoring container,
+uses the same immutable image for both phases, and publishes a complete artifact
+directory after cleanup. Direct historical execution still requires
+`HF_ALLOW_CODE_EVAL=1`, explicit `--confirm_run_unsafe_code`, timeouts and a
+separately isolated evaluator. Docker restrictions reduce risk but do not make
+arbitrary generated Python safe.
