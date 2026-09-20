@@ -2,14 +2,14 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.10256836.svg)](https://doi.org/10.5281/zenodo.10256836)
 
-## This fork: chat-model benchmark corrections
+## Canonical checkout: chat-model benchmark corrections
 
-Status: 2026-09-20. The `codex/chat-complete-evals` branch of
+Status: 2026-09-20. This checkout's `codex/chat-complete-evals` branch of
 [corbinjurgens/lm-evaluation-harness](https://github.com/corbinjurgens/lm-evaluation-harness)
 applies the corrections below to **normal task names**, for GPT-OSS and other
 models using the same answer contract. New comparisons use `humaneval`, `mbpp`,
 `gsm8k_cot_zeroshot`, and `ifeval`, without `--include_path` or GPT-OSS-only task
-names. These changed prompts and filters are fork methodology, not identical
+names. These changed prompts and filters are local methodology, not identical
 upstream benchmarks. Compatibility fixtures are not a guarantee for every model
 or output format; rerun comparison models under the same revision and profile.
 
@@ -83,17 +83,14 @@ data**; this is not a general-purpose redactor. Logged controls prove what was
 sent, not that the remote server honored it. The host launcher below enables this
 sidecar automatically and records runtime/dataset provenance in a separate manifest.
 
-### Install and run this fork
+### Install and run this checkout
 
 Use Docker with Linux containers and host Python 3.9 or newer. The image uses
 Python 3.13; the observed Python 3.14 installation could not resolve the IFEval
-dependency chain on this platform. Install this fork, not the normal PyPI package.
-
-Publication caveat (2026-09-20): these corrections are local ahead of the last
-verified remote branch at `e0c06df1`. A clone of that remote alone does not yet
-contain the full workflow. First publish the intended fork revision, or transfer
-the corrected local checkout to the other PC; verify the revision and presence
-of `scripts/run_benchmark.py` before building. Once available there:
+dependency chain on this platform. Use the canonical `codex/chat-complete-evals`
+branch rather than the normal PyPI package. On another machine, clone that branch
+and verify the revision and the presence of `scripts/run_benchmark.py` before
+building:
 
 ```bash
 git clone --branch codex/chat-complete-evals https://github.com/corbinjurgens/lm-evaluation-harness.git
@@ -104,16 +101,16 @@ docker compose -f docker/compose.yaml build
 python3 scripts/run_benchmark.py --help
 ```
 
-The image installs the fork as a wheel: source is baked in, not bind-mounted or
-editable. Rebuild after pulling source/lock changes. `docker/Dockerfile` pins
+The image installs this checkout as a wheel: source is baked in, not bind-mounted
+or editable. Rebuild after pulling source/lock changes. `docker/Dockerfile` pins
 build/runtime image digests, installs hashed `docker/requirements.lock` dependencies,
 and bakes a revision/hash-pinned NLTK resource for IFEval. The launcher resolves
 `lm-eval-fork:local` (or `--image`) to one immutable image ID for both phases.
 
 The optional persistent `lm_eval_sandbox` service is generation/debug only; it is
-not needed by the launcher. On this Mac,
-`/Users/apple/lm-evaluation-harness/docker-compose.yml` extends the fork's
-`docker/compose.yaml` and preserves old results at `/legacy-workspace:ro`.
+not needed by the launcher. The root `docker-compose.yml` extends this checkout's
+local `docker/compose.yaml`, builds from the same checkout, and exposes the whole
+checkout read-only at `/legacy-workspace` so historical results remain available.
 It no longer mounts `/workspace` or installs dependencies on startup. The image
 has no shell; inspect it with `docker exec lm_eval_sandbox python ...`, not `sh`.
 This service has been activated locally with the baked evaluator; the remote
@@ -161,7 +158,7 @@ health probe, so this address is an example, not a verified live endpoint.
 ```
 
 Load `OPENAI_API_KEY` and, if needed, `HF_TOKEN` into the host environment from a
-protected source; never put credentials in the JSON. Run from the fork checkout:
+protected source; never put credentials in the JSON. Run from the canonical checkout:
 
 ```bash
 mkdir -p benchmark-runs

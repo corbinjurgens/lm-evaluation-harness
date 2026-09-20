@@ -77,3 +77,10 @@ htmlcov/
 
 # Agent tooling
 .claude/settings.local.json
+/.claude/plan-runs/
+
+# Machine-local configuration and benchmark results
+/.python-version
+/diagnostics/results/
+/results/
+/results_*/

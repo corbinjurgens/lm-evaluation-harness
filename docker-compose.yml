@@ -1,0 +1,11 @@
+services:
+  lm-evaluator:
+    extends:
+      file: docker/compose.yaml
+      service: lm-evaluator
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      # Keep historical results visible without exposing a writable checkout.
+      - .:/legacy-workspace:ro
