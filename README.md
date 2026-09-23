@@ -160,7 +160,7 @@ health probe, so this address is an example, not a verified live endpoint.
 {
   "tasks": ["humaneval", "mbpp", "ifeval", "gsm8k_cot_zeroshot"],
   "model": "unsloth/gpt-oss-20b-GGUF",
-  "base_url": "http://192.168.11.49:8888/v1/chat/completions",
+  "base_url": "http://host.docker.internal:8888/v1/chat/completions",
   "gen_kwargs": {
     "temperature": 1.0,
     "top_p": 1.0,

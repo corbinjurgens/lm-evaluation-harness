@@ -3,9 +3,9 @@
 # Usage: sh pack.sh            copy the pack to the clipboard
 #        sh pack.sh --stdout   print the pack
 set -eu
-cd /Users/apple/personal/lm-evaluation-harness
+cd /Users/apple/lm-evaluation-harness
 emit() {
-  cat /Users/apple/personal/lm-evaluation-harness/.claude/research-prompts/2026-09-20-direct-tasks-correctness-review/prompt.md
+  cat /Users/apple/lm-evaluation-harness/.claude/research-prompts/2026-09-20-direct-tasks-correctness-review/prompt.md
   printf '%s' '
 ## Attached context
 

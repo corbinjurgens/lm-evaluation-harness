@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "run_benchmark.py"
 PORTABLE_COMPOSE = ROOT / "docker" / "compose.yaml"
-DEFAULT_URL = "http://192.168.11.49:8888/v1/chat/completions"
+DEFAULT_URL = "http://host.docker.internal:8888/v1/chat/completions"
 TASKS = ["humaneval", "mbpp", "ifeval", "gsm8k_cot_zeroshot"]
 
 
