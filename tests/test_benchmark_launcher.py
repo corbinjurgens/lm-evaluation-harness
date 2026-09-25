@@ -25,6 +25,7 @@ EXPECTED_SCORE_PATH = "/tmp/scores.json"  # noqa: S108
 class FakeDocker:
     def __init__(self, fail=None):
         self.calls = []
+        self.streamed = []
         self.alive = {}
         self.fail = fail
         self.bundle = {
@@ -47,8 +48,18 @@ class FakeDocker:
             "bundle_sha256": "d" * 64,
         }
 
-    def call(self, argv, timeout=60, log=None, binary_output=None, max_bytes=None):
+    def call(
+        self,
+        argv,
+        timeout=60,
+        log=None,
+        binary_output=None,
+        max_bytes=None,
+        stream=False,
+    ):
         self.calls.append(argv[:])
+        if stream:
+            self.streamed.append(argv[:])
         if log is not None:
             launcher.private_text(log, "bounded phase log\n")
         operation = argv[0]
@@ -234,6 +245,26 @@ class LauncherTests(unittest.TestCase):
             0o444,
         )
 
+    def test_generation_and_scoring_stream_with_stage_messages(self):
+        docker = FakeDocker()
+        with mock.patch.object(launcher.sys, "stderr", io.StringIO()) as stderr:
+            launcher.run(self.args, docker)
+        self.assertEqual(
+            [
+                call[call.index("lm_eval.benchmark_bundle") + 1]
+                for call in docker.streamed
+            ],
+            ["generate", "score"],
+        )
+        self.assertTrue(all(call[0] == "exec" for call in docker.streamed))
+        messages = stderr.getvalue()
+        self.assertIn("Starting generation container...\n", messages)
+        self.assertIn("Generation finished. Scoring offline...\n", messages)
+        self.assertLess(
+            messages.index("Starting generation container..."),
+            messages.index("Generation finished. Scoring offline..."),
+        )
+
     def test_failures_never_publish_and_cleanup_only_owned_ids(self):
         for failure in (
             "generate",
@@ -394,6 +425,82 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertEqual((self.root / "log").stat().st_mode & 0o777, 0o600)
         self.assertLessEqual((self.root / "log").stat().st_size, launcher.LOG_LIMIT)
+
+    def test_streamed_output_is_echoed_redacted_and_captured_unchanged(self):
+        payload = b"progress private-openai 50%\r" + "caf\u00e9 done\n".encode()
+        outputs, echoes = {}, {}
+        for stream in (False, True):
+            process = mock.Mock()
+            process.stdout = io.BytesIO(payload)
+            process.returncode = 0
+            process.poll.return_value = 0
+            with (
+                mock.patch.dict(os.environ, {"OPENAI_API_KEY": "private-openai"}),
+                mock.patch.object(
+                    launcher.shutil, "which", return_value="/usr/bin/docker"
+                ),
+                mock.patch.object(launcher.subprocess, "Popen", return_value=process),
+                mock.patch.object(launcher.sys, "stderr", io.StringIO()) as stderr,
+            ):
+                outputs[stream] = launcher.Docker().call(
+                    ["exec", "container", "python"],
+                    log=self.root / f"stream-{stream}.log",
+                    stream=stream,
+                )
+            echoes[stream] = stderr.getvalue()
+        expected = "progress [REDACTED] 50%\rcaf\u00e9 done\n"
+        self.assertEqual(outputs[True], expected)
+        self.assertEqual(outputs[False], expected)
+        self.assertEqual(echoes[True], expected)
+        self.assertEqual(echoes[False], "")
+        self.assertEqual(
+            (self.root / "stream-True.log").read_bytes(), expected.encode()
+        )
+
+    def streamed_call(self, stderr, payload, name):
+        process = mock.Mock()
+        process.stdout = io.BytesIO(payload)
+        process.returncode = 0
+        process.poll.return_value = 0
+        with (
+            mock.patch.object(launcher.shutil, "which", return_value="/usr/bin/docker"),
+            mock.patch.object(launcher.subprocess, "Popen", return_value=process),
+            mock.patch.object(launcher.sys, "stderr", stderr),
+        ):
+            output = launcher.Docker().call(
+                ["exec", "container", "python"],
+                log=self.root / name,
+                stream=True,
+            )
+        process.kill.assert_not_called()
+        return output
+
+    def test_unencodable_stream_echo_degrades_without_failing(self):
+        text = "Requesting API: 50%|\u2588\u2588\u2588\u2588\u258f     | 1/2\n"
+        raw = io.BytesIO()
+        stderr = io.TextIOWrapper(raw, encoding="cp1252")
+        with self.assertRaises(UnicodeEncodeError):
+            "\u2588".encode(stderr.encoding)
+        output = self.streamed_call(stderr, text.encode(), "cp1252.log")
+        self.assertEqual(output, text)
+        self.assertEqual((self.root / "cp1252.log").read_bytes(), text.encode("utf-8"))
+        self.assertEqual(raw.getvalue(), b"Requesting API: 50%|?????     | 1/2\n")
+
+    def test_failing_stream_echo_stops_without_failing_the_call(self):
+        class BrokenStderr:
+            writes = 0
+
+            def write(self, text):
+                BrokenStderr.writes += 1
+                raise OSError("stderr closed")
+
+            def flush(self):
+                pass
+
+        payload = b"a" * 70000 + b"tail\n"
+        output = self.streamed_call(BrokenStderr(), payload, "broken.log")
+        self.assertEqual(output, payload.decode())
+        self.assertEqual(BrokenStderr.writes, 1)
 
     def test_actual_isolation_mismatch_fails_before_scoring(self):
         for field, value in (

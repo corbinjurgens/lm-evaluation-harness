@@ -86,7 +86,10 @@ def completed_summary(run_directory: Path) -> dict:
     path = run_directory / "completed" / "scores.json"
     with path.open(encoding="utf-8") as stream:
         results = json.load(stream)["results"]
-    return {task: result["metrics"] for task, result in results.items()}
+    return {
+        task: {**result["metrics"], **result.get("stderr", {})}
+        for task, result in results.items()
+    }
 
 
 def parser() -> argparse.ArgumentParser:

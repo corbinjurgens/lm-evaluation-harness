@@ -180,6 +180,50 @@ def test_gsm_keeps_both_filters_and_wrong_document():
     assert set(result["samples"][0]["filters"]) == {"strict-match", "flexible-extract"}
 
 
+def test_scored_task_reports_mean_stderr_per_metric_and_filter():
+    value = fixture_bundle(
+        "gsm8k_cot_zeroshot",
+        [MATH_DOC] * 3,
+        [["The answer is 42."], ["42"], ["The answer is 99."]],
+    )
+    result = bundle.score(value)["results"]["gsm8k_cot_zeroshot"]
+    # Per-document values are [1, 0, 0] and [1, 1, 0]; for both, the sample
+    # variance is 1/3, so the standard error of the mean is sqrt(1/3 / 3) = 1/3.
+    assert result["stderr"] == {
+        "exact_match_stderr,strict-match": pytest.approx(1 / 3),
+        "exact_match_stderr,flexible-extract": pytest.approx(1 / 3),
+    }
+    assert set(result) == {"version", "num_documents", "metrics", "stderr", "samples"}
+
+
+def test_stderr_is_none_without_estimator_or_with_one_value():
+    second = {
+        "key": 2,
+        "prompt": "Use lowercase.",
+        "instruction_id_list": ["change_case:english_lowercase"],
+        "kwargs": [{}],
+    }
+    value = fixture_bundle(
+        "ifeval", [IF_DOC, second], [["apple banana"], ["UPPERCASE"]]
+    )
+    stderr = bundle.score(value)["results"]["ifeval"]["stderr"]
+    # Prompt-level values [1, 0] have sample variance 1/2: sqrt(1/2 / 2) = 1/2.
+    # Instruction-level accuracy has no registered stderr estimator.
+    assert stderr == {
+        "prompt_level_strict_acc_stderr,none": pytest.approx(0.5),
+        "prompt_level_loose_acc_stderr,none": pytest.approx(0.5),
+        "inst_level_strict_acc_stderr,none": None,
+        "inst_level_loose_acc_stderr,none": None,
+    }
+    single = bundle.score(
+        fixture_bundle("gsm8k_cot_zeroshot", [MATH_DOC], [["The answer is 42."]])
+    )["results"]["gsm8k_cot_zeroshot"]
+    assert single["stderr"] == {
+        "exact_match_stderr,strict-match": None,
+        "exact_match_stderr,flexible-extract": None,
+    }
+
+
 def test_ifeval_instruction_weighting_is_not_prompt_mean():
     second = {
         "key": 2,

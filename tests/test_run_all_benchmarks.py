@@ -65,6 +65,29 @@ def test_write_json_is_utf8_without_bom_and_never_overwrites(tmp_path):
     assert json.loads(destination.read_text(encoding="utf-8")) == {"model": "test"}
 
 
+def test_completed_summary_merges_stderr_into_metrics(tmp_path):
+    completed = tmp_path / "completed"
+    completed.mkdir()
+    scores = {
+        "results": {
+            "gsm8k": {
+                "metrics": {"exact_match,strict-match": 0.5},
+                "stderr": {"exact_match_stderr,strict-match": 0.25},
+            },
+            "legacy": {"metrics": {"acc,none": 1.0}},
+        }
+    }
+    (completed / "scores.json").write_text(json.dumps(scores), encoding="utf-8")
+
+    assert runner.completed_summary(tmp_path) == {
+        "gsm8k": {
+            "exact_match,strict-match": 0.5,
+            "exact_match_stderr,strict-match": 0.25,
+        },
+        "legacy": {"acc,none": 1.0},
+    }
+
+
 def test_missing_image_builds_with_portable_compose_and_requested_tag():
     inspection = subprocess.CompletedProcess([], 1)
     with (

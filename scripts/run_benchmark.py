@@ -7,6 +7,7 @@ failure. Docker reduces risk; it is not an absolute hostile-code sandbox.
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import math
@@ -73,9 +74,17 @@ class Docker:
             os.environ[k] for k in ("OPENAI_API_KEY", "HF_TOKEN") if os.environ.get(k)
         ]
 
-    def call(self, args, timeout=60, log=None, binary_output=None, max_bytes=None):
+    def call(
+        self,
+        args,
+        timeout=60,
+        log=None,
+        binary_output=None,
+        max_bytes=None,
+        stream=False,
+    ):
         if binary_output is None:
-            return self._call(args, timeout, log)
+            return self._call(args, timeout, log, stream=stream)
         if not isinstance(max_bytes, int) or max_bytes <= 0:
             raise ValueError("Binary transfer requires a positive byte bound")
         created = completed = False
@@ -90,7 +99,12 @@ class Docker:
             if created and not completed:
                 Path(binary_output).unlink()
 
-    def _call(self, args, timeout, log, transfer=None, max_bytes=None):
+    def redact(self, text):
+        for secret in self.secrets:
+            text = text.replace(secret, "[REDACTED]")
+        return text
+
+    def _call(self, args, timeout, log, transfer=None, max_bytes=None, stream=False):
         if not args or args[0] not in {
             "image",
             "create",
@@ -116,12 +130,19 @@ class Docker:
 
         def drain():
             nonlocal transferred
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            echoing = stream
             try:
                 while True:
-                    chunk = process.stdout.read(65536)
+                    if stream:
+                        chunk = process.stdout.read1(65536)
+                    else:
+                        chunk = process.stdout.read(65536)
                     if not chunk:
                         break
                     captured.extend(chunk[: max(0, LOG_LIMIT - len(captured))])
+                    if echoing:
+                        echoing = echo(self.redact(decoder.decode(chunk)))
                     if transfer is not None:
                         transferred += len(chunk)
                         if transferred > max_bytes:
@@ -148,9 +169,7 @@ class Docker:
                 process.wait()
             reader.join()
             process.stdout.close()
-            output = captured.decode("utf-8", errors="replace")
-            for secret in self.secrets:
-                output = output.replace(secret, "[REDACTED]")
+            output = self.redact(captured.decode("utf-8", errors="replace"))
             if log is not None:
                 logged = output
                 if transfer is not None:
@@ -177,6 +196,24 @@ class Docker:
         if process.returncode:
             raise RuntimeError(f"Docker {args[0]} failed: {output[-2000:]}")
         return output
+
+
+def echo(text):
+    """Best-effort live progress; return False once stderr cannot take more."""
+    target = sys.stderr
+    try:
+        buffer = getattr(target, "buffer", None)
+        if buffer is None:
+            target.write(text)
+        else:
+            # A redirected Windows stderr may be cp1252; never fail on tqdm glyphs.
+            target.flush()
+            buffer.write(text.encode(target.encoding or "utf-8", errors="replace"))
+            buffer.flush()
+        target.flush()
+    except (OSError, ValueError, LookupError):
+        return False
+    return True
 
 
 def private_text(path, text):
@@ -510,6 +547,7 @@ def run(args, docker=None):
 
     try:
         generation_deadline = time.monotonic() + args.generation_timeout
+        print("Starting generation container...", file=sys.stderr, flush=True)
         generation = create("generate", staged_config, remaining(generation_deadline))
         metadata = json.loads(
             docker.call(
@@ -535,6 +573,7 @@ def run(args, docker=None):
                 ],
                 timeout=remaining(generation_deadline),
                 log=partial / "generation.log",
+                stream=True,
             )
         finally:
             # Missing diagnostics should not hide the primary generation error.
@@ -558,6 +597,7 @@ def run(args, docker=None):
             raise ValueError("Generated bundle identity mismatch")
         docker.call(["rm", "--force", generation])
         containers.remove(generation)
+        print("Generation finished. Scoring offline...", file=sys.stderr, flush=True)
         score_input = partial / "score-input.json"
         shutil.copyfile(partial / "bundle.json", score_input)
         score_input.chmod(0o444)
@@ -581,6 +621,7 @@ def run(args, docker=None):
             ],
             timeout=remaining(scoring_deadline),
             log=partial / "scoring.log",
+            stream=True,
         )
         copy(
             scoring,

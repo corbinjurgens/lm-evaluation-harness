@@ -23,6 +23,7 @@ from datasets import Dataset
 
 from lm_eval import evaluator
 from lm_eval.api.instance import Instance
+from lm_eval.api.metrics import stderr_for_metric
 from lm_eval.api.task import ConfigurableTask
 from lm_eval.tasks._yaml_loader import load_yaml
 
@@ -701,14 +702,19 @@ def _score_validated(bundle, output):
                 for metric, value in metrics.items():
                     raw_metrics[(metric, filter_name)].append(value)
             samples.append({"doc_id": instance.doc_id, "filters": per_filter})
-        aggregates = {
-            f"{metric},{filter_name}": task.aggregation()[metric](values)
-            for (metric, filter_name), values in raw_metrics.items()
-        }
+        aggregates, stderrs = {}, {}
+        for (metric, filter_name), values in raw_metrics.items():
+            aggregate = task.aggregation()[metric]
+            aggregates[f"{metric},{filter_name}"] = aggregate(values)
+            stderr_fn = stderr_for_metric(aggregate, 100000)
+            stderrs[f"{metric}_stderr,{filter_name}"] = (
+                stderr_fn(values) if stderr_fn and len(values) > 1 else None
+            )
         results[name] = {
             "version": info["version"],
             "num_documents": len(samples),
             "metrics": aggregates,
+            "stderr": stderrs,
             "samples": samples,
         }
     result = {
