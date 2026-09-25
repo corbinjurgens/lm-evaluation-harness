@@ -7,7 +7,10 @@ param(
     [int] $MaxGenToks,
     [ValidateSet("low", "medium", "high")]
     [string] $ReasoningEffort,
-    [switch] $SmokeOnly
+    [switch] $SmokeOnly,
+    # Any other `scripts/benchmark.py run` flags, forwarded unchanged.
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]] $RemainingArguments
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +59,9 @@ if ($ReasoningEffort) {
 if ($SmokeOnly) {
     $RunnerArguments += "--smoke-only"
 }
+if ($RemainingArguments) {
+    $RunnerArguments += $RemainingArguments
+}
 
-& $Python (Join-Path $Harness "scripts\run_all_benchmarks.py") @RunnerArguments
+& $Python (Join-Path $Harness "scripts\benchmark.py") run @RunnerArguments
 exit $LASTEXITCODE

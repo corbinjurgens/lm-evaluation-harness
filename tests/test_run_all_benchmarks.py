@@ -13,6 +13,9 @@ SPEC = importlib.util.spec_from_file_location("run_all_benchmarks", SCRIPT)
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
+# Importable once the shim above has put the checkout root on sys.path.
+from benchmark_runner import pipeline
+
 
 def arguments(**overrides):
     values = {
@@ -91,8 +94,8 @@ def test_completed_summary_merges_stderr_into_metrics(tmp_path):
 def test_missing_image_builds_with_portable_compose_and_requested_tag():
     inspection = subprocess.CompletedProcess([], 1)
     with (
-        mock.patch.object(runner.subprocess, "run", return_value=inspection),
-        mock.patch.object(runner, "call") as call,
+        mock.patch.object(pipeline.subprocess, "run", return_value=inspection),
+        mock.patch.object(pipeline, "call") as call,
     ):
         runner.ensure_image("docker.exe", "private/evaluator:test")
 

@@ -3,21 +3,19 @@
 Only completed/ is a published run. .partial/ retains bounded diagnostics on
 failure. Docker reduces risk; it is not an absolute hostile-code sandbox.
 
-Compatibility shim: the launcher lives in benchmark_runner.pipeline.
+Compatibility shim: forwards to `scripts/benchmark.py run --config`.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import subprocess
 import sys
 from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmark_runner import pipeline
+from benchmark_runner import cli, pipeline
 from benchmark_runner.docker import (
     CONTAINER_TMP,
     LOG_LIMIT,
@@ -48,52 +46,24 @@ def run(args, docker=None):
 
 
 def parser():
-    cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("--config", required=True, type=Path)
-    cli.add_argument(
+    launcher = argparse.ArgumentParser(description=__doc__)
+    launcher.add_argument("--config", required=True, type=Path)
+    launcher.add_argument(
         "--output-dir",
         required=True,
         type=Path,
         help="New directory; parent must exist",
     )
-    cli.add_argument("--image", default="lm-eval-fork:local")
-    cli.add_argument("--memory-mib", type=int, default=512)
-    cli.add_argument("--tmpfs-mib", type=int, default=128)
-    cli.add_argument("--pids-limit", type=int, default=128)
-    cli.add_argument("--cpus", type=float, default=1.0)
-    cli.add_argument("--generation-timeout", type=int, default=86400)
-    cli.add_argument("--scoring-timeout", type=int, default=86400)
-    cli.add_argument(
-        "--max-artifact-mib",
-        type=int,
-        default=128,
-        help="Maximum bytes per transferred artifact; overflow fails the run",
-    )
-    return cli
+    launcher.add_argument("--image", default="lm-eval-fork:local")
+    cli.add_resource_arguments(launcher)
+    return launcher
 
 
-def main():
-    try:
-        destination = run(parser().parse_args())
-    except (
-        OSError,
-        ValueError,
-        RuntimeError,
-        subprocess.TimeoutExpired,
-        KeyboardInterrupt,
-    ) as error:
-        detail = str(error)
-        for key in ("OPENAI_API_KEY", "HF_TOKEN"):
-            if os.environ.get(key):
-                detail = detail.replace(os.environ[key], "[REDACTED]")
-        print(
-            f"Benchmark did not complete ({type(error).__name__}): {detail[:4096]}\n"
-            "If the run directory exists, inspect its .partial diagnostics and container ID files.",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"Completed benchmark: {destination}")
-    return 0
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    # Keep the old required flags and image default; `run` owns the rest.
+    args = parser().parse_args(argv)
+    return cli.main(["run", *argv, "--image", args.image])
 
 
 if __name__ == "__main__":

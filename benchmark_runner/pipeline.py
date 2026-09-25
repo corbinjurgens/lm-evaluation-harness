@@ -6,14 +6,18 @@ bounded diagnostics on failure.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
 
+from benchmark_runner.config import benchmark_config, model_slug, write_json
 from benchmark_runner.docker import (
     BUNDLE_PATH,
     SCORE_PATH,
@@ -28,6 +32,10 @@ from benchmark_runner.docker import (
     scoring_inspection,
 )
 from benchmark_runner.io import json_read, private_text, safe_path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PORTABLE_COMPOSE = ROOT / "docker" / "compose.yaml"
 
 
 def checked_config(path):
@@ -244,3 +252,80 @@ def run_stage(config_path, output_dir, image, resources, docker=None):
         return output / "completed"
     finally:
         containers.cleanup()
+
+
+def call(argv: list[str], *, environment=None) -> None:
+    subprocess.run(argv, cwd=ROOT, env=environment, check=True)  # noqa: S603
+
+
+def ensure_image(docker: str, image: str) -> None:
+    inspection = subprocess.run(  # noqa: S603
+        [docker, "image", "inspect", image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if inspection.returncode == 0:
+        return
+    print(f"Docker image {image!r} is missing; building it now...")
+    environment = os.environ.copy()
+    environment["LM_EVAL_IMAGE"] = image
+    call(
+        [docker, "compose", "-f", str(PORTABLE_COMPOSE), "build"],
+        environment=environment,
+    )
+
+
+def completed_summary(run_directory: Path) -> dict:
+    path = run_directory / "completed" / "scores.json"
+    with path.open(encoding="utf-8") as stream:
+        results = json.load(stream)["results"]
+    return {
+        task: {**result["metrics"], **result.get("stderr", {})}
+        for task, result in results.items()
+    }
+
+
+def require_image(image: str) -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError("Docker Desktop is not installed or docker is not on PATH")
+    ensure_image(docker, image)
+
+
+def run_reported(config_path, output_dir, args) -> Path:
+    """Run one stage in-process, then print where it landed and its scores."""
+    completed = run_stage(config_path, output_dir, args.image, vars(args))
+    print(f"Completed benchmark: {completed}")
+    print("\nScore summary:")
+    print(json.dumps(completed_summary(completed.parent), indent=2), flush=True)
+    return completed.parent
+
+
+def run_configured(args) -> Path:
+    """Run one complete single-stage JSON config (the manual-launcher route)."""
+    require_image(args.image)
+    return run_reported(args.config, args.output_dir, args)
+
+
+def run_campaign(args) -> Path:
+    """Run the one-document smoke stage, then the full datasets unless smoke-only."""
+    require_image(args.image)
+
+    stamp = datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    run_root = ROOT / "results" / "model-runs" / model_slug(args.model)
+    run_root.mkdir(parents=True, exist_ok=True)
+    smoke_config = run_root / f"{stamp}-smoke-config.json"
+    full_config = run_root / f"{stamp}-full-config.json"
+    smoke_run = run_root / f"{stamp}-smoke"
+    full_run = run_root / f"{stamp}-full"
+
+    write_json(smoke_config, benchmark_config(args, limit=1))
+    print(f"\nRunning a one-sample smoke check for {args.model}...", flush=True)
+    run_reported(smoke_config, smoke_run, args)
+    if args.smoke_only:
+        return smoke_run
+
+    write_json(full_config, benchmark_config(args))
+    print("\nSmoke check passed. Running all four complete benchmarks...", flush=True)
+    return run_reported(full_config, full_run, args)

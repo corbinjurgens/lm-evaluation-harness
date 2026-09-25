@@ -30,4 +30,4 @@ if [[ -z "${HF_TOKEN:-}" ]] && command -v security >/dev/null 2>&1; then
     fi
 fi
 
-exec "$PYTHON" "$HARNESS/scripts/run_all_benchmarks.py" "$@"
+exec "$PYTHON" "$HARNESS/scripts/benchmark.py" run "$@"
