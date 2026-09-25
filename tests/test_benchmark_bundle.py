@@ -5,13 +5,14 @@ import json
 import os
 import random
 import socket
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import Mock
 
 import datasets
 import evaluate
 import pytest
 
+from benchmark_runner.runtime import bundle as runtime
 from lm_eval import benchmark_bundle as bundle, evaluator
 from lm_eval.api.task import ConfigurableTask
 from lm_eval.models.dummy import DummyLM
@@ -45,7 +46,7 @@ def stable_source(monkeypatch):
     # Hashing the entire installed package is exercised separately; other tests
     # focus on the bundle boundary, not filesystem traversal cost.
     monkeypatch.setattr(
-        bundle,
+        runtime,
         "source_identity",
         lambda: {
             "package_sha256": "a" * 64,
@@ -457,7 +458,7 @@ def test_actual_predict_only_generation_without_code_opt_in(
 
 def test_generation_failure_keeps_log_but_no_bundle(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        bundle,
+        runtime,
         "ConfigurableTask",
         Mock(side_effect=RuntimeError("dataset unavailable")),
     )
@@ -489,7 +490,7 @@ def test_source_identity_detects_installed_helper_and_yaml_changes(
     helper = helpers / "utils.py"
     helper.write_text("x = 1\n")
     (package / "task.yaml").write_text("task: fixture\n")
-    monkeypatch.setattr(bundle, "PACKAGE", package)
+    monkeypatch.setattr(runtime, "PACKAGE", package)
     before = REAL_SOURCE_IDENTITY()
     (package / "ignored.pyc").write_bytes(b"cache")
     assert REAL_SOURCE_IDENTITY() == before
@@ -499,6 +500,37 @@ def test_source_identity_detects_installed_helper_and_yaml_changes(
     assert before["helpers_sha256"] != after["helpers_sha256"]
     (package / "task.yaml").write_text("task: changed\n")
     assert REAL_SOURCE_IDENTITY()["package_sha256"] != after["package_sha256"]
+
+
+def test_source_identity_detects_benchmark_runtime_changes(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    module = runtime_dir / "bundle.py"
+    module.write_text("x = 1\n")
+    monkeypatch.setattr(runtime, "RUNTIME", runtime_dir)
+    before = REAL_SOURCE_IDENTITY()
+    (runtime_dir / "notes.txt").write_text("not source\n")
+    assert REAL_SOURCE_IDENTITY() == before
+    module.write_text("x = 2\n")
+    after = REAL_SOURCE_IDENTITY()
+    assert before["benchmark_runtime"] != after["benchmark_runtime"]
+    assert before["package_sha256"] == after["package_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("windows", "posix", "helper"),
+    [
+        ("tasks\\humaneval\\utils.py", "tasks/humaneval/utils.py", True),
+        ("api\\task.py", "api/task.py", True),
+        ("tasks\\arc\\utils.py", "tasks/arc/utils.py", False),
+    ],
+)
+def test_source_keys_match_across_windows_and_posix(windows, posix, helper):
+    windows_key = bundle._source_key(PureWindowsPath(windows))
+    posix_key = bundle._source_key(PurePosixPath(posix))
+    assert windows_key == posix_key == posix
+    assert bundle._is_helper(windows_key) is helper
+    assert bundle._is_helper(posix_key) is helper
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -631,7 +663,7 @@ def test_scoring_failure_restores_caller_rng(monkeypatch, tmp_path):
         random.random()
         raise OSError("publication failed after scoring")
 
-    monkeypatch.setattr(bundle, "write_artifact", fail_publication)
+    monkeypatch.setattr(runtime, "write_artifact", fail_publication)
     before = random.getstate()
     with pytest.raises(OSError, match="publication failed after scoring"):
         bundle.score(value, tmp_path / "scores.json")
