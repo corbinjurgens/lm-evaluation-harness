@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,12 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_benchmark.py"
 SPEC = importlib.util.spec_from_file_location("benchmark_launcher", SCRIPT)
 launcher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(launcher)
+
+# Importable once the shim above has put the checkout root on sys.path.
+from benchmark_runner import docker as runner_docker, pipeline
+
+
+LAUNCHER_MODULES = ("io", "docker", "pipeline")
 IMAGE = "sha256:" + "a" * 64
 SOURCE = {"package_sha256": "b" * 64, "helpers_sha256": "c" * 64}
 # Independent oracle for an artifact inside private container tmpfs, not host /tmp.
@@ -42,6 +49,7 @@ class FakeDocker:
                 }
             },
         }
+        self.metadata = {"source": SOURCE, "python": "3.13.15", "lock_sha256": "e" * 64}
         self.result = {
             "format": "lm-eval-offline-results-v1",
             "source": SOURCE,
@@ -112,7 +120,12 @@ class FakeDocker:
                         "Config": {
                             "User": "65532:65532",
                             "Labels": {"lm-eval.run": label},
-                            "Env": ["HF_ALLOW_CODE_EVAL=1"],
+                            "Env": [
+                                "PATH=/opt/venv/bin:/usr/bin",
+                                "HF_ALLOW_CODE_EVAL=1",
+                                "HF_HUB_OFFLINE=1",
+                                "HF_DATASETS_OFFLINE=1",
+                            ],
                         },
                         "HostConfig": {
                             "NetworkMode": "none",
@@ -137,11 +150,13 @@ class FakeDocker:
                     }
                 ]
             )
+        if operation == "run":
+            if self.fail == "preflight":
+                raise RuntimeError("unrecognized arguments: metadata")
+            return json.dumps(self.metadata)
         if operation == "exec":
-            if "-c" in argv:
-                return json.dumps(
-                    {"source": SOURCE, "python": "3.13.15", "lock_sha256": "e" * 64}
-                )
+            if "metadata" in argv:
+                return json.dumps(self.metadata)
             phase = "generate" if "generate" in argv else "score"
             if self.fail == phase:
                 raise RuntimeError("injected " + phase)
@@ -247,13 +262,10 @@ class LauncherTests(unittest.TestCase):
 
     def test_generation_and_scoring_stream_with_stage_messages(self):
         docker = FakeDocker()
-        with mock.patch.object(launcher.sys, "stderr", io.StringIO()) as stderr:
+        with mock.patch.object(pipeline.sys, "stderr", io.StringIO()) as stderr:
             launcher.run(self.args, docker)
         self.assertEqual(
-            [
-                call[call.index("lm_eval.benchmark_bundle") + 1]
-                for call in docker.streamed
-            ],
+            [call[call.index("_worker") + 1] for call in docker.streamed],
             ["generate", "score"],
         )
         self.assertTrue(all(call[0] == "exec" for call in docker.streamed))
@@ -392,31 +404,95 @@ class LauncherTests(unittest.TestCase):
                 launcher.run(self.args, FakeDocker())
 
     def test_python39_syntax_and_standard_library_only(self):
-        tree = ast.parse(SCRIPT.read_text(), feature_version=(3, 9))
-        imports = {
-            node.module.split(".")[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-        }
-        self.assertLessEqual(imports, {"__future__", "pathlib", "urllib"})
+        package = SCRIPT.parents[1] / "benchmark_runner"
+        for path in (SCRIPT, *(package / f"{name}.py" for name in LAUNCHER_MODULES)):
+            with self.subTest(path=path.name):
+                tree = ast.parse(path.read_text(), feature_version=(3, 9))
+                imports = {
+                    node.module.split(".")[0]
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom)
+                }
+                self.assertLessEqual(
+                    imports, {"__future__", "pathlib", "urllib", "benchmark_runner"}
+                )
+                modules = {
+                    alias.name.split(".")[0]
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Import)
+                    for alias in node.names
+                }
+                self.assertLessEqual(modules, set(sys.stdlib_module_names))
+
+    def test_stale_image_stops_before_any_container_or_directory(self):
+        docker = FakeDocker("preflight")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"^Docker image lm-eval-fork:c1 is out of date; rebuild with: "
+            r"docker compose -f docker/compose\.yaml build$",
+        ):
+            launcher.run(self.args, docker)
+        self.assertEqual([call[0] for call in docker.calls], ["image", "run"])
+        preflight = docker.calls[1]
+        self.assertEqual(preflight[preflight.index("--network") + 1], "none")
+        self.assertEqual(
+            preflight[preflight.index(IMAGE) + 1 :],
+            ["python", "-m", "benchmark_runner", "_worker", "metadata"],
+        )
+        self.assertFalse(self.args.output_dir.exists())
+
+    def test_metadata_without_lock_hash_never_generates(self):
+        docker = FakeDocker()
+        del docker.metadata["lock_sha256"]
+        with self.assertRaisesRegex(ValueError, "lock_sha256"):
+            launcher.run(self.args, docker)
+        self.assertFalse(docker.alive)
+        self.assertFalse(any("generate" in call for call in docker.calls))
+        self.assertFalse((self.args.output_dir / "completed").exists())
+
+    def test_containers_run_worker_operations_not_inline_code(self):
+        docker = FakeDocker()
+        launcher.run(self.args, docker)
+        worker = ["python", "-m", "benchmark_runner", "_worker"]
+        for call in docker.calls:
+            self.assertNotIn("-c", call)
+        for call in (c for c in docker.calls if c[0] == "create"):
+            self.assertEqual(call[-5:], [*worker, "idle"])
+        execs = [call for call in docker.calls if call[0] == "exec"]
+        for call in execs:
+            self.assertEqual(call[2:6], worker)
+        self.assertEqual(
+            [call[6] for call in execs],
+            [
+                "metadata",
+                "generate",
+                "stream-artifact",
+                "stream-artifact",
+                "score",
+                "stream-artifact",
+            ],
+        )
+        self.assertEqual(execs[0][-2:], ["--config", "/input/config.json"])
 
     def test_runner_bounded_log_and_environment_secret_redaction(self):
         process = mock.Mock()
         process.stdout = io.BytesIO(
-            b"private-openai\n" + b"x" * (launcher.LOG_LIMIT * 2)
+            b"private-openai\n" + b"x" * (runner_docker.LOG_LIMIT * 2)
         )
         process.returncode = 0
         process.poll.return_value = 0
         with (
             mock.patch.dict(os.environ, {"OPENAI_API_KEY": "private-openai"}),
-            mock.patch.object(launcher.shutil, "which", return_value="/usr/bin/docker"),
             mock.patch.object(
-                launcher.subprocess, "Popen", return_value=process
+                runner_docker.shutil, "which", return_value="/usr/bin/docker"
+            ),
+            mock.patch.object(
+                runner_docker.subprocess, "Popen", return_value=process
             ) as popen,
         ):
             docker = launcher.Docker()
             output = docker.call(["image", "inspect", "image"], log=self.root / "log")
-        self.assertLessEqual(len(output), launcher.LOG_LIMIT)
+        self.assertLessEqual(len(output), runner_docker.LOG_LIMIT)
         self.assertNotIn("private-openai", output)
         self.assertIn("[REDACTED]", output)
         self.assertNotIn("shell", popen.call_args.kwargs)
@@ -424,7 +500,9 @@ class LauncherTests(unittest.TestCase):
             popen.call_args.args[0], ["/usr/bin/docker", "image", "inspect", "image"]
         )
         self.assertEqual((self.root / "log").stat().st_mode & 0o777, 0o600)
-        self.assertLessEqual((self.root / "log").stat().st_size, launcher.LOG_LIMIT)
+        self.assertLessEqual(
+            (self.root / "log").stat().st_size, runner_docker.LOG_LIMIT
+        )
 
     def test_streamed_output_is_echoed_redacted_and_captured_unchanged(self):
         payload = b"progress private-openai 50%\r" + "caf\u00e9 done\n".encode()
@@ -437,10 +515,12 @@ class LauncherTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, {"OPENAI_API_KEY": "private-openai"}),
                 mock.patch.object(
-                    launcher.shutil, "which", return_value="/usr/bin/docker"
+                    runner_docker.shutil, "which", return_value="/usr/bin/docker"
                 ),
-                mock.patch.object(launcher.subprocess, "Popen", return_value=process),
-                mock.patch.object(launcher.sys, "stderr", io.StringIO()) as stderr,
+                mock.patch.object(
+                    runner_docker.subprocess, "Popen", return_value=process
+                ),
+                mock.patch.object(runner_docker.sys, "stderr", io.StringIO()) as stderr,
             ):
                 outputs[stream] = launcher.Docker().call(
                     ["exec", "container", "python"],
@@ -463,9 +543,11 @@ class LauncherTests(unittest.TestCase):
         process.returncode = 0
         process.poll.return_value = 0
         with (
-            mock.patch.object(launcher.shutil, "which", return_value="/usr/bin/docker"),
-            mock.patch.object(launcher.subprocess, "Popen", return_value=process),
-            mock.patch.object(launcher.sys, "stderr", stderr),
+            mock.patch.object(
+                runner_docker.shutil, "which", return_value="/usr/bin/docker"
+            ),
+            mock.patch.object(runner_docker.subprocess, "Popen", return_value=process),
+            mock.patch.object(runner_docker.sys, "stderr", stderr),
         ):
             output = launcher.Docker().call(
                 ["exec", "container", "python"],
@@ -575,19 +657,21 @@ class LauncherTests(unittest.TestCase):
 
     def test_log_bound_applies_after_redaction_expansion(self):
         process = mock.Mock()
-        process.stdout = io.BytesIO(b"x" * launcher.LOG_LIMIT)
+        process.stdout = io.BytesIO(b"x" * runner_docker.LOG_LIMIT)
         process.poll.return_value = 0
         process.returncode = 0
         with (
             mock.patch.dict(os.environ, {"OPENAI_API_KEY": "x"}),
-            mock.patch.object(launcher.shutil, "which", return_value="/usr/bin/docker"),
-            mock.patch.object(launcher.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                runner_docker.shutil, "which", return_value="/usr/bin/docker"
+            ),
+            mock.patch.object(runner_docker.subprocess, "Popen", return_value=process),
         ):
             launcher.Docker().call(
                 ["exec", "container", "python"], log=self.root / "expanded.log"
             )
         self.assertLessEqual(
-            (self.root / "expanded.log").stat().st_size, launcher.LOG_LIMIT
+            (self.root / "expanded.log").stat().st_size, runner_docker.LOG_LIMIT
         )
         self.assertNotIn("x", (self.root / "expanded.log").read_text())
 
@@ -622,8 +706,10 @@ class LauncherTests(unittest.TestCase):
         process.poll.return_value = None
         process.wait.side_effect = [subprocess.TimeoutExpired("docker", 1), 0]
         with (
-            mock.patch.object(launcher.shutil, "which", return_value="/usr/bin/docker"),
-            mock.patch.object(launcher.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                runner_docker.shutil, "which", return_value="/usr/bin/docker"
+            ),
+            mock.patch.object(runner_docker.subprocess, "Popen", return_value=process),
             self.assertRaises(subprocess.TimeoutExpired),
         ):
             launcher.Docker().call(
@@ -658,8 +744,10 @@ class LauncherTests(unittest.TestCase):
         process.returncode = 0
         destination = self.root / "artifact"
         with (
-            mock.patch.object(launcher.shutil, "which", return_value="/usr/bin/docker"),
-            mock.patch.object(launcher.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                runner_docker.shutil, "which", return_value="/usr/bin/docker"
+            ),
+            mock.patch.object(runner_docker.subprocess, "Popen", return_value=process),
         ):
             docker = launcher.Docker()
             docker.call(
@@ -692,10 +780,10 @@ class LauncherTests(unittest.TestCase):
                 destination = self.root / failure
                 with (
                     mock.patch.object(
-                        launcher.shutil, "which", return_value="/usr/bin/docker"
+                        runner_docker.shutil, "which", return_value="/usr/bin/docker"
                     ),
                     mock.patch.object(
-                        launcher.subprocess, "Popen", return_value=process
+                        runner_docker.subprocess, "Popen", return_value=process
                     ),
                     self.assertRaises(
                         (RuntimeError, ValueError, subprocess.TimeoutExpired)
@@ -733,16 +821,15 @@ def verify_real_transfers(image):
             "--memory-swap",
             "256m",
             "--tmpfs",
-            f"{launcher.CONTAINER_TMP}:rw,nosuid,nodev,size=16m,mode=1777",
+            f"{runner_docker.CONTAINER_TMP}:rw,nosuid,nodev,size=16m,mode=1777",
             image_id,
-            "python",
-            "-c",
-            launcher.KEEPALIVE,
+            *runner_docker.WORKER,
+            "idle",
         ]
     ).strip()
     try:
         docker.call(["start", container])
-        directory = launcher.CONTAINER_TMP
+        directory = runner_docker.CONTAINER_TMP
         docker.call(
             [
                 "exec",
@@ -763,9 +850,8 @@ def verify_real_transfers(image):
                 [
                     "exec",
                     container,
-                    "python",
-                    "-c",
-                    launcher.STREAM_ARTIFACT,
+                    *runner_docker.WORKER,
+                    "stream-artifact",
                     f"{directory}/regular",
                     "256",
                 ],
@@ -780,9 +866,8 @@ def verify_real_transfers(image):
                         [
                             "exec",
                             container,
-                            "python",
-                            "-c",
-                            launcher.STREAM_ARTIFACT,
+                            *runner_docker.WORKER,
+                            "stream-artifact",
                             f"{directory}/{source}",
                             str(cap),
                         ],

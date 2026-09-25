@@ -18,6 +18,6 @@ services:
       - /tmp:rw,nosuid,nodev,size=128m,mode=1777
     environment:
       HF_ALLOW_CODE_EVAL: ""
-    # Generation/debug only. Use scripts/run_benchmark.py for isolated scoring.
-    command: ["python", "-c", "import time; time.sleep(604800)"]
+    # Generation/debug only. Use scripts/benchmark.py for runs.
+    command: ["python", "-m", "benchmark_runner", "_worker", "idle"]
     restart: unless-stopped
