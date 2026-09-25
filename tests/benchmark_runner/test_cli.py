@@ -21,14 +21,43 @@ def test_help_exits_zero():
     assert excinfo.value.code == 0
 
 
+def test_help_hides_worker_subcommand(capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert "_worker" not in out
+    assert "==SUPPRESS==" not in out
+
+
 def test_run_not_implemented(capsys):
     assert main(["run"]) == 2
     assert "not implemented" in capsys.readouterr().err
 
 
-def test_worker_not_implemented(capsys):
-    assert main(["_worker"]) == 2
-    assert "not implemented" in capsys.readouterr().err
+def test_worker_dispatches_to_runtime_worker(monkeypatch):
+    calls = []
+
+    def fake_worker_main(argv):
+        calls.append(argv)
+        return 0
+
+    from benchmark_runner.runtime import worker
+
+    monkeypatch.setattr(worker, "main", fake_worker_main)
+    assert main(["_worker", "idle"]) == 0
+    assert calls == [["idle"]]
+
+
+def test_worker_missing_op_exits_nonzero():
+    with pytest.raises(SystemExit) as excinfo:
+        main(["_worker"])
+    assert excinfo.value.code == 2
+
+
+def test_worker_unknown_op_exits_nonzero():
+    with pytest.raises(SystemExit) as excinfo:
+        main(["_worker", "not-a-real-op"])
+    assert excinfo.value.code == 2
 
 
 def test_cli_module_does_not_import_heavy_dependencies():
