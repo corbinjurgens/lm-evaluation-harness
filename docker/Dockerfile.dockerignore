@@ -7,6 +7,8 @@
 !licenses/code_eval-APACHE-2.0.txt
 !lm_eval/
 !lm_eval/**
+!benchmark_runner/
+!benchmark_runner/**
 !docker/
 !docker/requirements.lock
 **/__pycache__

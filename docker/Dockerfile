@@ -21,6 +21,7 @@ RUN /opt/venv/bin/python -m pip install --quiet --no-cache-dir --require-hashes 
 COPY pyproject.toml README.md LICENSE.md /build/
 COPY licenses/code_eval-APACHE-2.0.txt /build/licenses/code_eval-APACHE-2.0.txt
 COPY lm_eval /build/lm_eval
+COPY benchmark_runner /build/benchmark_runner
 RUN /opt/venv/bin/python -m pip wheel --quiet --no-deps --no-build-isolation --wheel-dir /wheels /build && \
     /opt/venv/bin/python -m pip install --quiet --no-index --no-deps /wheels/lm_eval-*.whl && \
     /opt/venv/bin/python -m pip check

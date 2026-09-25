@@ -35,7 +35,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["lm_eval*"]
+include = ["lm_eval*", "benchmark_runner*"]
 
 [tool.setuptools]
 license-files = ["LICENSE.md", "licenses/code_eval-APACHE-2.0.txt"]
